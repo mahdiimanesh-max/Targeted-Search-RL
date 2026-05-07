@@ -25,7 +25,7 @@
 we propose **A<sup>2</sup>TGPO** (**A**gentic **T**urn-**G**roup **P**olicy **O**ptimization with **A**daptive Turn-level Clipping), which retains IG as the intrinsic signal but re-designs how it is normalized, accumulated, and consumed: (i) **turn-group normalization**: normalizes IG within each (prompt, turn-index) group so that each turn is compared only against peers at the same interaction depth; (ii) **variance-rescaled discounted accumulation**: divides cumulative normalized IG by square root of accumulated terms to keep advantage magnitudes comparable across turn positions; and (iii) **adaptive turn-level clipping**: modulates each turn's clipping range based on its normalized IG, widening the update region for informative turns and narrowing it for uninformative ones.
 
 <p align="center">
-  <img alt="intro" src="assets/framework.pdf" />
+  <img alt="intro" src="assets/framework.png" />
   <i>
   The overview of A<sup>2</sup>TGPO framework.
   </i>
@@ -77,7 +77,7 @@ python data_process/singlehop_test_merge.py
 
 ```bash
 #create env
-conda create -n atpo python==3.10
+conda create -n atgpo python==3.10
 conda activate atgpo
 
 # install torch & flash-atten
