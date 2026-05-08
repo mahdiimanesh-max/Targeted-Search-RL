@@ -4,7 +4,7 @@
 
 <div align="center"> 
 
-[![Paper](https://img.shields.io/badge/Paper-arXiv-b5212f.svg?style=flat-square&logo=arxiv)]()
+[![Paper](https://img.shields.io/badge/Paper-arXiv-b5212f.svg?style=flat-square&logo=arxiv)](https://arxiv.org/abs/2605.06200)
 [![Paper](https://img.shields.io/badge/Paper-Hugging%20Face-yellow?style=flat-square&logo=huggingface)]()
 <!-- [![](https://raw.githubusercontent.com/SwanHubX/assets/main/badge2.svg)](https://swanlab.cn/@yux1ang/Tree-GRPO/overview) -->
 
@@ -107,5 +107,13 @@ We express our gratitude to these open-source projects.
 
 ## Citation
 ```bibtex
-
+@misc{chen2026a2tgpoagenticturngrouppolicy,
+      title={A$^2$TGPO: Agentic Turn-Group Policy Optimization with Adaptive Turn-level Clipping}, 
+      author={Dingwei Chen and Zefang Zong and Zhipeng Ma and Leo Luo and Yang Li and Chengming Li and Peng Chen and Jie Jiang},
+      year={2026},
+      eprint={2605.06200},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2605.06200}, 
+}
 ```
