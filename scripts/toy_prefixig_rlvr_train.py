@@ -24,11 +24,12 @@ import numpy as np
 from tqdm import tqdm
 
 
-TOK_USEFUL = 0
-TOK_REDUNDANT = 1
-TOK_DISTRACTOR = 2
-TOK_NO_SEARCH = 3
-ANSWER_OFFSET = 4
+TOK_USEFUL_BRIDGE = 0
+TOK_USEFUL_ANSWER = 1
+TOK_REDUNDANT = 2
+TOK_DISTRACTOR = 3
+TOK_NO_SEARCH = 4
+ANSWER_OFFSET = 5
 
 
 class TransformerBlock(nn.Module):
@@ -186,6 +187,35 @@ def token_log_scores(model, prompts, completions, answer_count: int, completion_
     return selected.squeeze(-1).reshape(batch_size, group_size, completion_len)
 
 
+def required_hops(prompts_np: np.ndarray, hop_mode: str) -> np.ndarray:
+    if hop_mode == "single":
+        return np.ones_like(prompts_np, dtype=np.int32)
+    if hop_mode == "multi":
+        return np.full_like(prompts_np, 2, dtype=np.int32)
+    if hop_mode == "mixed":
+        return 1 + (prompts_np % 2).astype(np.int32)
+    raise ValueError(f"Unknown hop_mode: {hop_mode}")
+
+
+def retrieval_noise_thresholds(retrieval_noise: str) -> tuple[int, int]:
+    """Return deterministic distractor/stale corruption percentages."""
+    if retrieval_noise == "clean":
+        return 0, 0
+    if retrieval_noise == "distractor25":
+        return 25, 0
+    if retrieval_noise == "distractor50":
+        return 50, 0
+    if retrieval_noise == "stale25":
+        return 0, 25
+    if retrieval_noise == "stale50":
+        return 0, 50
+    if retrieval_noise == "mixed25":
+        return 15, 10
+    if retrieval_noise == "mixed50":
+        return 30, 20
+    raise ValueError(f"Unknown retrieval_noise: {retrieval_noise}")
+
+
 def analyze_trajectories(
     prompts_np: np.ndarray,
     completions_np: np.ndarray,
@@ -195,6 +225,8 @@ def analyze_trajectories(
     reward_gated_eff: bool,
     ig_mode: str = "raw_vr",
     token_advantage_mode: str = "raw",
+    hop_mode: str = "multi",
+    retrieval_noise: str = "clean",
 ) -> dict[str, np.ndarray]:
     batch_size, group_size, completion_len = completions_np.shape
     target_answer = ANSWER_OFFSET + prompts_np[:, None]
@@ -202,26 +234,64 @@ def analyze_trajectories(
     rewards = (answer_token == target_answer).astype(np.float32)
 
     action_tokens = completions_np[:, :, :-1]
-    useful_seen = np.zeros((batch_size, group_size), dtype=bool)
+    required = required_hops(prompts_np, hop_mode)[:, None]
+    bridge_seen = np.zeros((batch_size, group_size), dtype=bool)
+    answer_evidence_seen = np.zeros((batch_size, group_size), dtype=bool)
     turn_igs = np.zeros_like(action_tokens, dtype=np.float32)
     redundant_turns = np.zeros((batch_size, group_size), dtype=np.float32)
     distractor_turns = np.zeros((batch_size, group_size), dtype=np.float32)
+    distractor_pct, stale_pct = retrieval_noise_thresholds(retrieval_noise)
+    group_ids = np.arange(group_size)[None, :]
 
     for step in range(completion_len - 1):
         token = action_tokens[:, :, step]
-        useful = token == TOK_USEFUL
-        redundant = (token == TOK_REDUNDANT) | (useful & useful_seen)
+        bridge = token == TOK_USEFUL_BRIDGE
+        answer_evidence = token == TOK_USEFUL_ANSWER
         distractor = token == TOK_DISTRACTOR
+        single_hop = required == 1
+        multi_hop = required == 2
+        evidence_action = bridge | answer_evidence
+        noise_score = (prompts_np[:, None] * 17 + group_ids * 31 + step * 13) % 100
+        corrupted_distractor = evidence_action & (noise_score < distractor_pct)
+        corrupted_stale = (
+            evidence_action
+            & (noise_score >= distractor_pct)
+            & (noise_score < distractor_pct + stale_pct)
+        )
+        evidence_available = evidence_action & ~(corrupted_distractor | corrupted_stale)
 
-        turn_igs[:, :, step] = np.where(useful & ~useful_seen, 1.0, turn_igs[:, :, step])
+        useful_bridge = multi_hop & bridge & evidence_available & ~bridge_seen
+        useful_answer = answer_evidence & evidence_available & ~answer_evidence_seen
+        useful_answer = np.where(multi_hop, useful_answer & bridge_seen, useful_answer)
+        out_of_order_answer = multi_hop & answer_evidence & evidence_available & ~bridge_seen
+
+        redundant = (
+            (token == TOK_REDUNDANT)
+            | (single_hop & bridge)
+            | (bridge & bridge_seen)
+            | (answer_evidence & answer_evidence_seen)
+            | out_of_order_answer
+            | corrupted_stale
+        )
+        distractor = distractor | corrupted_distractor
+
+        turn_igs[:, :, step] = np.where(useful_bridge, 0.65, turn_igs[:, :, step])
+        turn_igs[:, :, step] = np.where(useful_answer, 1.0, turn_igs[:, :, step])
+        turn_igs[:, :, step] = np.where(out_of_order_answer, 0.05, turn_igs[:, :, step])
         turn_igs[:, :, step] = np.where(redundant, 0.05, turn_igs[:, :, step])
         turn_igs[:, :, step] = np.where(distractor, -0.25, turn_igs[:, :, step])
 
         redundant_turns += redundant.astype(np.float32)
         distractor_turns += distractor.astype(np.float32)
-        useful_seen |= useful
+        bridge_seen |= bridge & evidence_available
+        answer_evidence_seen |= answer_evidence & evidence_available
 
     non_null_turns = np.maximum((action_tokens != TOK_NO_SEARCH).sum(axis=2), 1)
+    evidence_complete = np.where(
+        required == 1,
+        answer_evidence_seen,
+        bridge_seen & answer_evidence_seen,
+    )
 
     turn_mean = turn_igs.mean(axis=1, keepdims=True)
     turn_std = turn_igs.std(axis=1, keepdims=True) + 1e-6
@@ -265,17 +335,23 @@ def analyze_trajectories(
 
     token_advantages[:, :, :-1] = rewards[:, :, None] + lambda_ig * turn_credit
     if reward_gated_eff:
+        repeated_bridge = np.maximum(
+            (action_tokens == TOK_USEFUL_BRIDGE).cumsum(axis=2) - 1, 0
+        )
+        repeated_answer = np.maximum(
+            (action_tokens == TOK_USEFUL_ANSWER).cumsum(axis=2) - 1, 0
+        )
         redundant_steps = (action_tokens == TOK_REDUNDANT).astype(np.float32)
-        redundant_steps += np.maximum((action_tokens == TOK_USEFUL).cumsum(axis=2) - 1, 0)
+        redundant_steps += repeated_bridge + repeated_answer
         token_advantages[:, :, :-1] -= lambda_eff * rewards[:, :, None] * redundant_steps
     token_advantages[:, :, -1] = rewards
     centered_token_adv = token_advantages - token_advantages.mean(axis=1, keepdims=True)
     std_token_adv = token_advantages.std(axis=1, keepdims=True) + 1e-6
     token_advantages = centered_token_adv / std_token_adv
 
-    correct_useful = (rewards > 0) & useful_seen & (redundant_turns <= 0)
-    correct_redundant = (rewards > 0) & (redundant_turns > 0)
-    correct_no_search = (rewards > 0) & (~useful_seen) & (non_null_turns <= 1)
+    correct_useful = (rewards > 0) & evidence_complete & (redundant_turns <= 0)
+    correct_redundant = (rewards > 0) & evidence_complete & (redundant_turns > 0)
+    correct_no_search = (rewards > 0) & (~evidence_complete) & (non_null_turns <= 1)
     wrong_distractor = (rewards <= 0) & (distractor_turns > 0)
 
     return {
@@ -309,6 +385,8 @@ def make_rollout_batch(model, args, *, reward_gated_eff: bool, lambda_eff: float
         reward_gated_eff=reward_gated_eff,
         ig_mode=getattr(args, "ig_mode", "raw_vr"),
         token_advantage_mode=getattr(args, "token_advantage_mode", "raw"),
+        hop_mode=getattr(args, "hop_mode", "multi"),
+        retrieval_noise=getattr(args, "retrieval_noise", "clean"),
     )
     return RolloutBatch(
         prompts=prompts,
@@ -450,6 +528,8 @@ def evaluate(model, args):
         reward_gated_eff=True,
         ig_mode=getattr(args, "ig_mode", "raw_vr"),
         token_advantage_mode=getattr(args, "token_advantage_mode", "raw"),
+        hop_mode=getattr(args, "hop_mode", "multi"),
+        retrieval_noise=getattr(args, "retrieval_noise", "clean"),
     )
     reward = float(stats["rewards"].mean())
     useful = float(stats["useful_correct"].mean())
@@ -637,6 +717,26 @@ def build_parser():
     parser.add_argument("--group-size", type=int, default=6)
     parser.add_argument("--answer-count", type=int, default=4)
     parser.add_argument("--completion-len", type=int, default=4)
+    parser.add_argument(
+        "--hop-mode",
+        choices=["single", "multi", "mixed"],
+        default="multi",
+        help="Evidence structure: one-hop, two-hop, or prompt-mixed.",
+    )
+    parser.add_argument(
+        "--retrieval-noise",
+        choices=[
+            "clean",
+            "distractor25",
+            "distractor50",
+            "stale25",
+            "stale50",
+            "mixed25",
+            "mixed50",
+        ],
+        default="clean",
+        help="Deterministic evidence corruption used for noisy-retriever tests.",
+    )
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--epochs-per-batch", type=int, default=2)

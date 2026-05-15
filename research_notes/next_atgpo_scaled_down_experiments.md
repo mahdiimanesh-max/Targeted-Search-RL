@@ -189,6 +189,72 @@ larger gains on multi-hop
 best efficiency on mixed-hop
 ```
 
+### Completed Pilot Result
+
+We added `--hop-mode {single,multi,mixed}` to:
+
+```text
+scripts/toy_prefixig_rlvr_train.py
+```
+
+The toy action vocabulary now separates one-hop answer evidence from two-hop
+bridge-plus-answer evidence. We ran 5-seed, 200-episode single-hop and multi-hop
+experiments with:
+
+```text
+reward_tpo
+prefixig_grpo
+prefixig_tpo
+prefixig_tpo_rg_eff
+```
+
+Outputs:
+
+```text
+outputs/toy_prefixig_rlvr_singlehop_5seed.csv
+outputs/toy_prefixig_rlvr_multihop_5seed.csv
+outputs/figures_singlehop_5seed/
+outputs/figures_multihop_5seed/
+```
+
+Single-hop final metrics:
+
+```text
+method              | reward | useful | redundant | distractor | useful-red
+--------------------+--------+--------+-----------+------------+-----------
+reward_tpo          | 0.911  | 0.086  | 0.027     | 0.015      | +0.059
+prefixig_grpo       | 0.594  | 0.594  | 0.001     | 0.000      | +0.593
+prefixig_tpo        | 0.810  | 0.779  | 0.017     | 0.015      | +0.762
+prefixig_tpo_rg_eff | 0.811  | 0.793  | 0.010     | 0.017      | +0.783
+```
+
+Multi-hop final metrics:
+
+```text
+method              | reward | useful | redundant | distractor | useful-red
+--------------------+--------+--------+-----------+------------+-----------
+reward_tpo          | 0.911  | 0.003  | 0.009     | 0.015      | -0.006
+prefixig_grpo       | 0.989  | 0.989  | 0.000     | 0.000      | +0.989
+prefixig_tpo        | 0.796  | 0.760  | 0.016     | 0.016      | +0.744
+prefixig_tpo_rg_eff | 0.769  | 0.741  | 0.008     | 0.022      | +0.732
+```
+
+Interpretation:
+
+- Reward-only TPO gets high answer reward in both settings, but it does not
+  learn useful evidence behavior, especially in multi-hop where useful evidence
+  is almost zero.
+- PrefixIG methods strongly increase useful evidence behavior.
+- In single-hop, PrefixIG-TPO+rg_eff gives the best useful-minus-redundant gap.
+- In multi-hop, raw PrefixIG-GRPO is strongest in this toy setup, while
+  PrefixIG-TPO and rg_eff still substantially outperform reward-only on process
+  quality.
+
+This is useful for the paper because it shows that answer reward and process
+quality can diverge sharply. The multi-hop reward-only model answers correctly
+without learning the required evidence process, which motivates explicit
+evidence-credit objectives.
+
 ## Experiment 3: Adaptive Clipping Ablation
 
 ### Goal
@@ -279,6 +345,69 @@ target mass on distractor trajectories
 This tests the mechanism more deeply. PrefixIG should penalize evidence that
 does not increase answer likelihood, and reward-gated efficiency should avoid
 rewarding short but wrong trajectories.
+
+### Completed Pilot Result
+
+We added a deterministic noisy-retriever mode to:
+
+```text
+scripts/toy_prefixig_rlvr_train.py
+```
+
+using:
+
+```text
+--retrieval-noise clean|distractor25|distractor50|stale25|stale50|mixed25|mixed50
+```
+
+The noisy setting corrupts some useful evidence actions into either distractor
+evidence or stale/redundant evidence. We ran mixed-hop tasks under moderate and
+strong mixed corruption.
+
+Outputs:
+
+```text
+outputs/toy_prefixig_rlvr_mixedhop_noisy25_5seed.csv
+outputs/toy_prefixig_rlvr_mixedhop_noisy50_5seed.csv
+outputs/figures_mixedhop_noisy25_5seed/
+outputs/figures_mixedhop_noisy50_5seed/
+```
+
+Moderate noise, `mixed25`:
+
+```text
+method              | reward | useful | redundant | distractor | useful-red
+--------------------+--------+--------+-----------+------------+-----------
+reward_tpo          | 0.911  | 0.040  | 0.018     | 0.019      | +0.022
+prefixig_grpo       | 0.994  | 0.576  | 0.224     | 0.000      | +0.352
+prefixig_tpo        | 0.804  | 0.544  | 0.028     | 0.041      | +0.517
+prefixig_tpo_rg_eff | 0.756  | 0.536  | 0.007     | 0.061      | +0.529
+```
+
+Strong noise, `mixed50`:
+
+```text
+method              | reward | useful | redundant | distractor | useful-red
+--------------------+--------+--------+-----------+------------+-----------
+reward_tpo          | 0.911  | 0.025  | 0.009     | 0.023      | +0.016
+prefixig_grpo       | 0.994  | 0.097  | 0.602     | 0.002      | -0.505
+prefixig_tpo        | 0.792  | 0.210  | 0.148     | 0.073      | +0.061
+prefixig_tpo_rg_eff | 0.759  | 0.268  | 0.015     | 0.084      | +0.253
+```
+
+Interpretation:
+
+- This is our strongest toy evidence so far for the target-policy approach.
+- Reward-only keeps high answer reward but does not learn useful evidence.
+- PrefixIG-GRPO gets very high reward, but under strong noise it collapses into
+  redundant-correct behavior and has negative useful-minus-redundant.
+- PrefixIG-TPO is more robust than PrefixIG-GRPO under noisy retrieval.
+- PrefixIG-TPO+rg_eff is best on useful-minus-redundant and sharply suppresses
+  redundant behavior under both moderate and strong noise.
+
+This supports the main hypothesis better than the clean single-hop/multi-hop
+experiment: target construction and reward-gated efficiency matter most when
+retrieval contains stale or distracting evidence.
 
 ## Experiment 5: Offline Qwen LoRA Single-Hop vs Multi-Hop
 
