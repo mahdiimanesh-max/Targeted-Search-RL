@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Build offline rg_eff trajectory targets for a small Qwen LoRA pilot.
+"""Build offline trajectory targets for small Qwen LoRA pilots.
 
-This script turns the generated-policy diagnostic into a trainable offline
-dataset:
+This script turns the generated-policy diagnostic into trainable offline
+datasets:
 
 1. Generate K search trajectories per synthetic QA case with a real MLX model.
-2. Score each group with PrefixIG-TPO plus reward-gated efficiency.
+2. Score each group with one or more target policies.
 3. Write all candidates with target weights for later offline TPO.
-4. Sample an SFT-style train/valid/test JSONL from the target distribution.
+4. Sample SFT-style train/valid/test JSONL files from each target distribution.
 
-The SFT JSONL is a practical first laptop experiment: it distills the rg_eff
-trajectory distribution into a LoRA adapter using the existing mlx-lm-lora SFT
-trainer. The full candidate JSONL preserves the group weights for a later true
-offline TPO trainer.
+The SFT JSONL is a practical laptop experiment: it distills a target trajectory
+distribution into a LoRA adapter using the existing mlx-lm-lora SFT trainer. The
+full candidate JSONL preserves the group weights for a later true offline TPO
+trainer.
 """
 
 from __future__ import annotations
@@ -40,8 +40,47 @@ from mlx_generated_policy_diagnostics import (  # noqa: E402
     write_jsonl,
 )
 from mlx_real_policy_diagnostics import MLXPolicyScorer  # noqa: E402
-from prefix_ig_tpo_smoke import Sample, compute_diagnostics, extract_answer, extract_boxed  # noqa: E402
+from prefix_ig_tpo_smoke import (  # noqa: E402
+    Sample,
+    compute_diagnostics,
+    extract_answer,
+    extract_boxed,
+    mean_std,
+    softmax,
+)
 from prefix_ig_tpo_synthetic import make_case  # noqa: E402
+
+TARGET_METHODS = {
+    "reward_tpo",
+    "prefixig_tpo",
+    "prefixig_tpo_rg_eff",
+}
+
+
+def parse_target_methods(raw: str) -> list[str]:
+    aliases = {
+        "final_reward_tpo": "reward_tpo",
+        "rg_eff": "prefixig_tpo_rg_eff",
+        "prefixig_tpo+rg_eff": "prefixig_tpo_rg_eff",
+    }
+    methods = []
+    for item in raw.split(","):
+        method = aliases.get(item.strip(), item.strip())
+        if not method:
+            continue
+        if method not in TARGET_METHODS:
+            valid = ", ".join(sorted(TARGET_METHODS))
+            raise ValueError(f"Unknown target method {method!r}; expected one of: {valid}")
+        methods.append(method)
+    if not methods:
+        raise ValueError("At least one target method is required.")
+    return methods
+
+
+def method_output_dir(base_output_dir: Path, method: str, methods: list[str]) -> Path:
+    if len(methods) == 1:
+        return base_output_dir
+    return base_output_dir / method
 
 
 def split_records(
@@ -70,6 +109,11 @@ def write_sft_dataset(output_dir: Path, train: list[dict], valid: list[dict], te
     write_jsonl(output_dir / "test.jsonl", test)
 
 
+def read_jsonl(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
 def weighted_choice(items: list[dict], weights: list[float], rng: random.Random) -> dict:
     total = sum(max(weight, 0.0) for weight in weights)
     if total <= 0.0:
@@ -85,7 +129,7 @@ def weighted_choice(items: list[dict], weights: list[float], rng: random.Random)
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default=None)
     parser.add_argument(
         "--adapter-path",
         default=None,
@@ -100,6 +144,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidates-jsonl",
         default="outputs/offline_rg_eff_qwen_candidates.jsonl",
+    )
+    parser.add_argument(
+        "--input-candidates-jsonl",
+        default=None,
+        help=(
+            "Reuse an existing candidates JSONL instead of generating new "
+            "trajectories. This is useful for building comparable LoRA "
+            "datasets from the same cached Qwen rollouts."
+        ),
+    )
+    parser.add_argument(
+        "--target-methods",
+        default="prefixig_tpo_rg_eff",
+        help=(
+            "Comma-separated target datasets to build. Supported: "
+            "reward_tpo,prefixig_tpo,prefixig_tpo_rg_eff. When more than one "
+            "method is requested, each dataset is written under output-dir/METHOD."
+        ),
     )
     parser.add_argument("--num-examples", type=int, default=16)
     parser.add_argument("--samples-per-example", type=int, default=4)
@@ -138,9 +200,174 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def compute_target_diags(method: str, generated_samples: list[Sample], scorer, args):
+    if method == "reward_tpo":
+        return compute_diagnostics(
+            samples=generated_samples,
+            scorer=scorer,
+            lambda_ig=0.0,
+            tau=args.tau,
+            curvature_eps=args.curvature_eps,
+            apply_curvature=False,
+        )
+
+    base_diags = compute_diagnostics(
+        samples=generated_samples,
+        scorer=scorer,
+        lambda_ig=args.lambda_ig,
+        tau=args.tau,
+        curvature_eps=args.curvature_eps,
+        apply_curvature=False,
+    )
+    if method == "prefixig_tpo":
+        return base_diags
+    if method == "prefixig_tpo_rg_eff":
+        return apply_efficiency_penalty(
+            diags=base_diags,
+            samples=generated_samples,
+            tau=args.tau,
+            apply_curvature=False,
+            reward_gated=True,
+            curvature_eps=args.curvature_eps,
+            optimal_turns=args.eff_optimal_turns,
+            repeat_threshold=args.eff_repeat_threshold,
+            min_turn_ig=args.eff_min_turn_ig,
+            lambda_extra_turn=args.eff_lambda_extra_turn,
+            lambda_repeat_query=args.eff_lambda_repeat_query,
+            lambda_low_ig=args.eff_lambda_low_ig,
+        )
+    raise ValueError(f"Unknown target method: {method}")
+
+
+def group_records_by_case(records: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for record in records:
+        grouped.setdefault(int(record["case_id"]), []).append(record)
+    return grouped
+
+
+def cached_method_records(method: str, records: list[dict], args) -> list[dict]:
+    by_case = group_records_by_case(records)
+    out: list[dict] = []
+    for _case_id, case_records in sorted(by_case.items()):
+        prefix_igs = [float(record.get("prefix_ig", 0.0)) for record in case_records]
+        ig_mean, ig_std = mean_std(prefix_igs)
+        utilities = []
+        for record in case_records:
+            reward = float(record.get("reward", 0.0))
+            if method == "reward_tpo":
+                utility = reward
+            elif method == "prefixig_tpo":
+                z_ig = (float(record.get("prefix_ig", 0.0)) - ig_mean) / ig_std
+                utility = reward + args.lambda_ig * z_ig
+            elif method == "prefixig_tpo_rg_eff":
+                # Existing pilot candidates were produced by the rg_eff builder.
+                # Reuse the stored utility so all baselines share the same rollouts.
+                utility = float(record.get("utility", reward))
+            else:
+                raise ValueError(f"Unknown target method: {method}")
+            utilities.append(utility)
+
+        weights = softmax(
+            [
+                float(record["old_logp"]) + utility / max(args.tau, 1e-8)
+                for record, utility in zip(case_records, utilities)
+            ]
+        )
+        for record, utility, weight in zip(case_records, utilities, weights):
+            copied = dict(record)
+            copied["target_method"] = method
+            copied["utility"] = utility
+            copied["target_weight"] = weight
+            out.append(copied)
+    return out
+
+
+def build_sft_records(
+    method_records: list[dict],
+    sft_samples_per_example: int,
+    rng: random.Random,
+) -> list[dict]:
+    sft_records: list[dict] = []
+    for _case_id, case_candidates in sorted(group_records_by_case(method_records).items()):
+        weights = [float(record["target_weight"]) for record in case_candidates]
+        for draw_idx in range(sft_samples_per_example):
+            chosen = weighted_choice(case_candidates, weights, rng)
+            sft_records.append(
+                {
+                    "prompt": chosen["prompt"],
+                    "completion": chosen["completion"],
+                    "case_id": chosen["case_id"],
+                    "source_sample_id": chosen["sample_id"],
+                    "draw_id": draw_idx,
+                    "target_method": chosen["target_method"],
+                    "bucket": chosen["bucket"],
+                    "target_weight": chosen["target_weight"],
+                    "answer": chosen["answer"],
+                }
+            )
+    return sft_records
+
+
+def summarize_method(method: str, records: list[dict], sft_records: list[dict], output_dir: Path, args) -> None:
+    train, valid, test = split_records(
+        sft_records,
+        rng=random.Random(args.seed + 10_003 + sorted(TARGET_METHODS).index(method)),
+        valid_fraction=args.valid_fraction,
+        test_fraction=args.test_fraction,
+    )
+    write_sft_dataset(output_dir, train=train, valid=valid, test=test)
+
+    by_case = group_records_by_case(records)
+    denom = max(len(by_case), 1)
+    bucket_counts: dict[str, int] = {}
+    target_mass: dict[str, float] = {}
+    for record in records:
+        bucket = str(record["bucket"])
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        target_mass[bucket] = target_mass.get(bucket, 0.0) + float(record["target_weight"])
+
+    print()
+    print(method)
+    print("-" * len(method))
+    print(f"sft records: {len(sft_records)} -> {output_dir}")
+    print(f"split: train={len(train)} valid={len(valid)} test={len(test)}")
+    print("Bucket counts")
+    for bucket in sorted(bucket_counts):
+        print(f"- {bucket}: {bucket_counts[bucket]}")
+    print("Average target mass per case")
+    for bucket in sorted(target_mass):
+        print(f"- {bucket}: {target_mass[bucket] / denom:.3f}")
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
+    target_methods = parse_target_methods(args.target_methods)
     rng = random.Random(args.seed)
+    if args.input_candidates_jsonl:
+        source_records = read_jsonl(Path(args.input_candidates_jsonl))
+        candidate_records: list[dict] = []
+        print(f"Reusing cached candidates from {args.input_candidates_jsonl}")
+        print(f"source candidate trajectories: {len(source_records)}")
+        for method in target_methods:
+            method_records = cached_method_records(method, source_records, args)
+            candidate_records.extend(method_records)
+            sft_records = build_sft_records(
+                method_records=method_records,
+                sft_samples_per_example=args.sft_samples_per_example,
+                rng=random.Random(args.seed + 907 + target_methods.index(method)),
+            )
+            out_dir = method_output_dir(Path(args.output_dir), method, target_methods)
+            summarize_method(method, method_records, sft_records, out_dir, args)
+
+        write_jsonl(Path(args.candidates_jsonl), candidate_records)
+        print()
+        print(f"candidate trajectories: {len(candidate_records)} -> {args.candidates_jsonl}")
+        return
+
+    if args.model is None:
+        raise ValueError("--model is required unless --input-candidates-jsonl is provided.")
+
     scorer = MLXPolicyScorer(
         args.model,
         adapter_path=args.adapter_path,
@@ -148,9 +375,13 @@ def main() -> None:
     )
 
     candidate_records: list[dict] = []
-    sft_records: list[dict] = []
-    bucket_counts: dict[str, int] = {}
-    target_mass: dict[str, float] = {}
+    sft_records_by_method: dict[str, list[dict]] = {method: [] for method in target_methods}
+    bucket_counts_by_method: dict[str, dict[str, int]] = {
+        method: {} for method in target_methods
+    }
+    target_mass_by_method: dict[str, dict[str, float]] = {
+        method: {} for method in target_methods
+    }
 
     cases = [make_case(case_id, rng) for case_id in range(args.num_examples)]
 
@@ -208,102 +439,91 @@ def main() -> None:
                 )
             )
 
-        base_diags = compute_diagnostics(
-            samples=generated_samples,
-            scorer=scorer,
-            lambda_ig=args.lambda_ig,
-            tau=args.tau,
-            curvature_eps=args.curvature_eps,
-            apply_curvature=False,
-        )
-        target_diags = apply_efficiency_penalty(
-            diags=base_diags,
-            samples=generated_samples,
-            tau=args.tau,
-            apply_curvature=False,
-            reward_gated=True,
-            curvature_eps=args.curvature_eps,
-            optimal_turns=args.eff_optimal_turns,
-            repeat_threshold=args.eff_repeat_threshold,
-            min_turn_ig=args.eff_min_turn_ig,
-            lambda_extra_turn=args.eff_lambda_extra_turn,
-            lambda_repeat_query=args.eff_lambda_repeat_query,
-            lambda_low_ig=args.eff_lambda_low_ig,
-        )
+        progress_parts = []
+        for method in target_methods:
+            target_diags = compute_target_diags(method, generated_samples, scorer, args)
+            bucket_counts = bucket_counts_by_method[method]
+            target_mass = target_mass_by_method[method]
 
-        case_candidates: list[dict] = []
-        for diag, sample in zip(target_diags, generated_samples):
-            bucket = classify_generated_sample(sample, diag)
-            bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
-            target_mass[bucket] = target_mass.get(bucket, 0.0) + float(diag.target_weight)
+            case_candidates: list[dict] = []
+            for diag, sample in zip(target_diags, generated_samples):
+                bucket = classify_generated_sample(sample, diag)
+                bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+                target_mass[bucket] = target_mass.get(bucket, 0.0) + float(diag.target_weight)
 
-            prediction = extract_answer(sample.completion) or extract_boxed(sample.completion) or ""
-            record = {
-                "case_id": case_idx,
-                "sample_id": sample.sample_id,
-                "prompt": user_prompt,
-                "generation_prompt": generation_prompt,
-                "completion": sample.completion,
-                "answer": case.answer,
-                "prediction": prediction,
-                "bucket": bucket,
-                "old_logp": sample.old_logp,
-                "reward": diag.final_reward,
-                "prefix_ig": diag.prefix_ig,
-                "turn_igs": list(diag.turn_igs),
-                "curvature": diag.curvature,
-                "utility": diag.utility,
-                "target_weight": diag.target_weight,
-            }
-            case_candidates.append(record)
-            candidate_records.append(record)
-
-        weights = [float(record["target_weight"]) for record in case_candidates]
-        for draw_idx in range(args.sft_samples_per_example):
-            chosen = weighted_choice(case_candidates, weights, rng)
-            sft_records.append(
-                {
-                    "prompt": chosen["prompt"],
-                    "completion": chosen["completion"],
-                    "case_id": chosen["case_id"],
-                    "source_sample_id": chosen["sample_id"],
-                    "draw_id": draw_idx,
-                    "bucket": chosen["bucket"],
-                    "target_weight": chosen["target_weight"],
-                    "answer": chosen["answer"],
+                prediction = extract_answer(sample.completion) or extract_boxed(sample.completion) or ""
+                record = {
+                    "target_method": method,
+                    "case_id": case_idx,
+                    "sample_id": sample.sample_id,
+                    "prompt": user_prompt,
+                    "generation_prompt": generation_prompt,
+                    "completion": sample.completion,
+                    "answer": case.answer,
+                    "prediction": prediction,
+                    "bucket": bucket,
+                    "old_logp": sample.old_logp,
+                    "reward": diag.final_reward,
+                    "prefix_ig": diag.prefix_ig,
+                    "turn_igs": list(diag.turn_igs),
+                    "curvature": diag.curvature,
+                    "utility": diag.utility,
+                    "target_weight": diag.target_weight,
                 }
-            )
+                case_candidates.append(record)
+                candidate_records.append(record)
 
-        print(
-            f"case {case_idx + 1:03d}/{args.num_examples}: "
-            f"best={max(case_candidates, key=lambda item: item['target_weight'])['bucket']} "
-            f"mass_sum={sum(weights):.3f}"
-        )
+            weights = [float(record["target_weight"]) for record in case_candidates]
+            for draw_idx in range(args.sft_samples_per_example):
+                chosen = weighted_choice(case_candidates, weights, rng)
+                sft_records_by_method[method].append(
+                    {
+                        "prompt": chosen["prompt"],
+                        "completion": chosen["completion"],
+                        "case_id": chosen["case_id"],
+                        "source_sample_id": chosen["sample_id"],
+                        "draw_id": draw_idx,
+                        "target_method": method,
+                        "bucket": chosen["bucket"],
+                        "target_weight": chosen["target_weight"],
+                        "answer": chosen["answer"],
+                    }
+                )
+            best_bucket = max(case_candidates, key=lambda item: item["target_weight"])["bucket"]
+            progress_parts.append(f"{method}:best={best_bucket}")
 
-    train, valid, test = split_records(
-        sft_records,
-        rng=rng,
-        valid_fraction=args.valid_fraction,
-        test_fraction=args.test_fraction,
-    )
+        print(f"case {case_idx + 1:03d}/{args.num_examples}: " + " | ".join(progress_parts))
+
     write_jsonl(Path(args.candidates_jsonl), candidate_records)
-    write_sft_dataset(Path(args.output_dir), train=train, valid=valid, test=test)
 
     denom = max(args.num_examples, 1)
     print()
-    print("Offline rg_eff target build complete")
+    print("Offline target build complete")
     print("=" * 44)
     print(f"candidate trajectories: {len(candidate_records)} -> {args.candidates_jsonl}")
-    print(f"sft records: {len(sft_records)} -> {args.output_dir}")
-    print(f"split: train={len(train)} valid={len(valid)} test={len(test)}")
-    print()
-    print("Bucket counts")
-    for bucket in sorted(bucket_counts):
-        print(f"- {bucket}: {bucket_counts[bucket]}")
-    print()
-    print("Average target mass per case")
-    for bucket in sorted(target_mass):
-        print(f"- {bucket}: {target_mass[bucket] / denom:.3f}")
+    for method in target_methods:
+        method_rng = random.Random(args.seed + 10_003 + target_methods.index(method))
+        sft_records = sft_records_by_method[method]
+        train, valid, test = split_records(
+            sft_records,
+            rng=method_rng,
+            valid_fraction=args.valid_fraction,
+            test_fraction=args.test_fraction,
+        )
+        out_dir = method_output_dir(Path(args.output_dir), method, target_methods)
+        write_sft_dataset(out_dir, train=train, valid=valid, test=test)
+
+        print()
+        print(f"{method}")
+        print("-" * len(method))
+        print(f"sft records: {len(sft_records)} -> {out_dir}")
+        print(f"split: train={len(train)} valid={len(valid)} test={len(test)}")
+        print("Bucket counts")
+        for bucket in sorted(bucket_counts_by_method[method]):
+            print(f"- {bucket}: {bucket_counts_by_method[method][bucket]}")
+        print("Average target mass per case")
+        for bucket in sorted(target_mass_by_method[method]):
+            print(f"- {bucket}: {target_mass_by_method[method][bucket] / denom:.3f}")
 
 
 if __name__ == "__main__":
