@@ -481,6 +481,35 @@ rg_eff-LoRA OriginalPolicy useful: 0.880, distractor: 0.120, correct: 0.880
 The next version should increase sample size and separate single-hop from
 multi-hop.
 
+### Updated Qwen LoRA Pilot: 5x2 Held-Out Seed
+
+We trained five Qwen2.5-0.5B conditions: base Qwen, reward-only TPO LoRA,
+PrefixIG-TPO LoRA, PrefixIG-TPO with reward-gated efficiency, and an A-TGPO
+component proxy LoRA. We then evaluated them on 5 held-out examples with 2
+samples per example, seed 101, using only the generated-policy `OriginalPolicy`
+row for model comparison.
+
+```text
+model                    correct | useful | redundant | distractor | useful-red
+Base Qwen                0.174   | 0.174  | 0.000     | 0.826      | +0.174
+reward_tpo LoRA          1.000   | 0.600  | 0.400     | 0.000      | +0.200
+prefixig_tpo LoRA        0.914   | 0.914  | 0.000     | 0.086      | +0.914
+prefixig_tpo_rg_eff LoRA 0.698   | 0.391  | 0.307     | 0.302      | +0.084
+atgpo_proxy LoRA         0.801   | 0.801  | 0.000     | 0.199      | +0.801
+```
+
+Interpretation:
+
+- Reward-only TPO improves correctness but induces redundant correct search.
+- PrefixIG-TPO is the strongest current Qwen LoRA result on useful-red and
+  correctness/usefulness balance.
+- A-TGPO proxy is a strong baseline and should stay in the main comparison.
+- The current reward-gated efficiency variant is unstable in this real-model
+  pilot and should be treated as an ablation.
+
+Next: repeat this comparison over additional seeds before making a paper-scale
+claim.
+
 ## Recommended Order
 
 ### Step 1

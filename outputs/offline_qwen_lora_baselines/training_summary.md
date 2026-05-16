@@ -72,3 +72,25 @@ the actual generated behavior of the loaded model or adapter.
 This is a pilot result, not a final paper-scale result. The A-TGPO proxy adapter
 is very strong on this tiny evaluation, but it should be rerun with more
 examples and seeds before making a main claim.
+
+## Held-Out 5x2 Evaluation
+
+We reran the generated-policy comparison with 5 examples, 2 samples per example,
+seed 101, flexible rollouts, at most 2 search turns, `action-max-tokens=40`, and
+`answer-max-tokens=32`. The table again uses only `OriginalPolicy`, i.e. the
+actual generated behavior of each loaded model.
+
+| loaded model | useful | redundant | distractor | correct | useful-red |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base Qwen | 0.174 | 0.000 | 0.826 | 0.174 | +0.174 |
+| reward_tpo LoRA | 0.600 | 0.400 | 0.000 | 1.000 | +0.200 |
+| prefixig_tpo LoRA | 0.914 | 0.000 | 0.086 | 0.914 | +0.914 |
+| prefixig_tpo_rg_eff LoRA | 0.391 | 0.307 | 0.302 | 0.698 | +0.084 |
+| atgpo_proxy LoRA | 0.801 | 0.000 | 0.199 | 0.801 | +0.801 |
+
+This is the cleaner Qwen LoRA pilot result. Reward-only training improves
+correctness but creates redundant correct search. PrefixIG-TPO gives the best
+useful-minus-redundant gap and the best balance of correctness and useful
+search. A-TGPO proxy remains a strong baseline. The current reward-gated
+efficiency variant is not reliable on this held-out seed and should be treated
+as an ablation rather than the main method.
