@@ -1,0 +1,6 @@
+model,useful,redundant,no_search,distractor,other,correct,useful_red
+Base Qwen,0.375,0.137,0.000,0.488,0.000,0.512,+0.239
+reward_tpo LoRA,0.500,0.374,0.000,0.126,0.000,0.874,+0.126
+prefixig_tpo LoRA,0.652,0.000,0.000,0.348,0.000,0.652,+0.652
+prefixig_tpo_rg_eff LoRA,0.631,0.369,0.000,0.000,0.000,1.000,+0.261
+atgpo_proxy LoRA,1.000,0.000,0.000,0.000,0.000,1.000,+1.000

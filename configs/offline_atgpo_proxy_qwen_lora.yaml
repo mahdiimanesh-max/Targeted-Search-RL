@@ -1,0 +1,28 @@
+model: "Qwen/Qwen2.5-0.5B-Instruct"
+load_in_4bits: true
+train: true
+train_type: lora
+train_mode: sft
+optimizer: adamw
+data: "outputs/offline_qwen_lora_baselines/atgpo_proxy"
+fuse: false
+seed: 7
+num_layers: 8
+batch_size: 1
+iters: 80
+gradient_accumulation_steps: 8
+val_batches: 5
+learning_rate: 5e-5
+steps_per_report: 5
+steps_per_eval: 20
+adapter_path: "outputs/adapters/offline_atgpo_proxy_qwen_lora"
+save_every: 40
+test: false
+test_batches: 5
+max_seq_length: 1024
+grad_checkpoint: true
+mask_prompt: true
+lora_parameters:
+  rank: 8
+  scale: 20.0
+  dropout: 0.0

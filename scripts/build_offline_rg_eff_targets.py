@@ -48,9 +48,10 @@ from prefix_ig_tpo_smoke import (  # noqa: E402
     mean_std,
     softmax,
 )
-from prefix_ig_tpo_synthetic import make_case  # noqa: E402
+from prefix_ig_tpo_synthetic import atgpo_component_one_step_proxy, make_case  # noqa: E402
 
 TARGET_METHODS = {
+    "atgpo_proxy",
     "reward_tpo",
     "prefixig_tpo",
     "prefixig_tpo_rg_eff",
@@ -59,6 +60,9 @@ TARGET_METHODS = {
 
 def parse_target_methods(raw: str) -> list[str]:
     aliases = {
+        "a_tgpo_proxy": "atgpo_proxy",
+        "atgpo_components": "atgpo_proxy",
+        "a-tgpo-components": "atgpo_proxy",
         "final_reward_tpo": "reward_tpo",
         "rg_eff": "prefixig_tpo_rg_eff",
         "prefixig_tpo+rg_eff": "prefixig_tpo_rg_eff",
@@ -151,7 +155,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Reuse an existing candidates JSONL instead of generating new "
             "trajectories. This is useful for building comparable LoRA "
-            "datasets from the same cached Qwen rollouts."
+            "datasets from the same cached Qwen rollouts. The atgpo_proxy "
+            "method additionally requires --model because it recomputes "
+            "token-level component scores."
         ),
     )
     parser.add_argument(
@@ -159,8 +165,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="prefixig_tpo_rg_eff",
         help=(
             "Comma-separated target datasets to build. Supported: "
-            "reward_tpo,prefixig_tpo,prefixig_tpo_rg_eff. When more than one "
-            "method is requested, each dataset is written under output-dir/METHOD."
+            "reward_tpo,prefixig_tpo,prefixig_tpo_rg_eff,atgpo_proxy. When "
+            "more than one method is requested, each dataset is written under "
+            "output-dir/METHOD."
         ),
     )
     parser.add_argument("--num-examples", type=int, default=16)
@@ -197,6 +204,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eff-lambda-extra-turn", type=float, default=0.6)
     parser.add_argument("--eff-lambda-repeat-query", type=float, default=0.4)
     parser.add_argument("--eff-lambda-low-ig", type=float, default=0.0)
+    parser.add_argument("--grpo-step-scale", type=float, default=1.0)
+    parser.add_argument("--atgpo-alpha", type=float, default=0.3)
+    parser.add_argument("--atgpo-gamma", type=float, default=1.0)
+    parser.add_argument("--atgpo-clip-low", type=float, default=3e-3)
+    parser.add_argument("--atgpo-clip-high", type=float, default=4e-3)
+    parser.add_argument("--atgpo-sim-step", type=float, default=0.05)
     return parser
 
 
@@ -246,7 +259,60 @@ def group_records_by_case(records: list[dict]) -> dict[int, list[dict]]:
     return grouped
 
 
-def cached_method_records(method: str, records: list[dict], args) -> list[dict]:
+def cached_atgpo_proxy_records(records: list[dict], scorer, args) -> list[dict]:
+    out: list[dict] = []
+    for _case_id, case_records in sorted(group_records_by_case(records).items()):
+        samples = [
+            Sample(
+                sample_id=str(record["sample_id"]),
+                prompt=str(record.get("generation_prompt") or record["prompt"]),
+                completion=str(record["completion"]),
+                answer=str(record["answer"]),
+                old_logp=float(record["old_logp"]),
+            )
+            for record in case_records
+        ]
+        base_diags = compute_diagnostics(
+            samples=samples,
+            scorer=scorer,
+            lambda_ig=args.lambda_ig,
+            tau=args.tau,
+            curvature_eps=args.curvature_eps,
+            apply_curvature=False,
+        )
+        proxy_diags, component_rows = atgpo_component_one_step_proxy(
+            diags=base_diags,
+            samples=samples,
+            scorer=scorer,
+            step_scale=args.grpo_step_scale,
+            alpha=args.atgpo_alpha,
+            gamma=args.atgpo_gamma,
+            clip_low=args.atgpo_clip_low,
+            clip_high=args.atgpo_clip_high,
+            dynamic_clip=True,
+            sim_step=args.atgpo_sim_step,
+            token_logprob_scorer=scorer,
+        )
+        for record, diag, component in zip(case_records, proxy_diags, component_rows):
+            copied = dict(record)
+            copied["target_method"] = "atgpo_proxy"
+            copied["utility"] = diag.utility
+            copied["target_weight"] = diag.target_weight
+            copied["atgpo_proxy_weight"] = component.proxy_weight
+            copied["atgpo_weighted_pg_loss"] = component.weighted_pg_loss
+            copied["atgpo_clip_fraction"] = component.clip_fraction
+            copied["atgpo_sampled_kl"] = component.sampled_kl
+            copied["atgpo_token_advantage"] = component.token_advantage
+            out.append(copied)
+    return out
+
+
+def cached_method_records(method: str, records: list[dict], args, scorer=None) -> list[dict]:
+    if method == "atgpo_proxy":
+        if scorer is None:
+            raise ValueError("atgpo_proxy requires --model when using cached candidates.")
+        return cached_atgpo_proxy_records(records, scorer=scorer, args=args)
+
     by_case = group_records_by_case(records)
     out: list[dict] = []
     for _case_id, case_records in sorted(by_case.items()):
@@ -349,8 +415,17 @@ def main() -> None:
         candidate_records: list[dict] = []
         print(f"Reusing cached candidates from {args.input_candidates_jsonl}")
         print(f"source candidate trajectories: {len(source_records)}")
+        scorer = None
+        if "atgpo_proxy" in target_methods:
+            if args.model is None:
+                raise ValueError("atgpo_proxy with --input-candidates-jsonl requires --model.")
+            scorer = MLXPolicyScorer(
+                args.model,
+                adapter_path=args.adapter_path,
+                load_in_4bits=args.load_in_4bits,
+            )
         for method in target_methods:
-            method_records = cached_method_records(method, source_records, args)
+            method_records = cached_method_records(method, source_records, args, scorer=scorer)
             candidate_records.extend(method_records)
             sft_records = build_sft_records(
                 method_records=method_records,
