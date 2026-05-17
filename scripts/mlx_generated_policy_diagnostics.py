@@ -49,6 +49,8 @@ from prefix_ig_tpo_synthetic import (  # noqa: E402
 
 
 RESULT_RE = re.compile(r"<result>(?P<result>.*?)</result>", flags=re.DOTALL)
+BIRTH_DOC_RE = re.compile(r"Page 1: (?P<person>.*?) was born in (?P<city>.*?)\.", flags=re.DOTALL)
+AUTHOR_DOC_RE = re.compile(r"Page 1: (?P<book>.*?) was written by (?P<person>.*?)\.", flags=re.DOTALL)
 
 
 def unique_results(completions: list[str]) -> list[str]:
@@ -115,6 +117,25 @@ def build_flexible_tool_loop_prompt(question_prompt: str, max_search_turns: int)
         "- You may answer immediately if you already know the answer.\n"
         f"- Otherwise, use up to {max_search_turns} search actions.\n"
         "- Good search strategy: find the book author, then the author's birthplace.\n"
+        "- Stop searching once you have enough evidence.\n"
+        "- The answer must be only the birthplace city.\n"
+        "- Do not write bullets, markdown, explanations, or text after </answer>.\n\n"
+        f"{question_prompt}\n\n"
+        "Begin:\n"
+    )
+
+
+def build_singlehop_flexible_tool_loop_prompt(question_prompt: str, max_search_turns: int) -> str:
+    return (
+        "Answer the QA task using as few search actions as needed. At each step, "
+        "output exactly one action.\n\n"
+        "Allowed actions:\n"
+        "<search>short query</search>\n"
+        "<answer>\\boxed{final city only}</answer>\n\n"
+        "Rules:\n"
+        "- You may answer immediately if you already know the answer.\n"
+        f"- Otherwise, use up to {max_search_turns} search actions.\n"
+        "- Good search strategy: search for the person's birthplace.\n"
         "- Stop searching once you have enough evidence.\n"
         "- The answer must be only the birthplace city.\n"
         "- Do not write bullets, markdown, explanations, or text after </answer>.\n\n"
@@ -302,6 +323,64 @@ def classify_generated_sample(sample, diag) -> str:
     if (not correct) and turns:
         return "distractor_wrong"
     return "other_wrong"
+
+
+def extract_case_facts(case) -> tuple[str, str, str, list[str]]:
+    search_index = unique_results([sample.completion for sample in case.samples])
+    person = ""
+    book = ""
+    city = case.answer
+    for doc in search_index:
+        birth_match = BIRTH_DOC_RE.search(doc)
+        if birth_match and exact_match(birth_match.group("city"), [case.answer]) > 0.0:
+            person = " ".join(birth_match.group("person").split())
+            city = " ".join(birth_match.group("city").split())
+        author_match = AUTHOR_DOC_RE.search(doc)
+        if author_match:
+            book = " ".join(author_match.group("book").split())
+            if not person:
+                person = " ".join(author_match.group("person").split())
+    return book, person, city, search_index
+
+
+def build_regime_case(case, regime: str, rng: random.Random) -> tuple[str, list[str]]:
+    book, person, city, search_index = extract_case_facts(case)
+    if regime == "multihop":
+        return case.prompt, search_index
+
+    distractor_cities = [
+        "Paris",
+        "Berlin",
+        "Madrid",
+        "Rome",
+        "Vienna",
+        "Lisbon",
+        "Prague",
+        "Athens",
+    ]
+    distractor_city = rng.choice([item for item in distractor_cities if item != city])
+
+    if regime == "singlehop":
+        prompt = (
+            f"Question: Where was {person} born?\n"
+            "Use search if needed. Answer with <answer>\\boxed{...}</answer>."
+        )
+        docs = [
+            f"Page 1: {person} was born in {city}.",
+            f"Page 1: {person} wrote {book}.",
+            f"Page 1: A different person was born in {distractor_city}.",
+        ]
+        return prompt, docs
+
+    if regime == "noisy":
+        noisy_docs = []
+        if book and person:
+            noisy_docs.append(f"Page 1: {book} was written by {person}.")
+            noisy_docs.append(f"Page 1: {person} was born in {distractor_city}.")
+            noisy_docs.append(f"Page 1: {person} was born in {city}.")
+            noisy_docs.append(f"Page 1: {book} was first published in {distractor_city}.")
+            return case.prompt, noisy_docs
+    raise ValueError(f"Unknown eval regime: {regime}")
 
 
 def normalized_query_terms(query: str) -> set[str]:
@@ -561,6 +640,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="guided",
         help="guided encourages exactly two searches; flexible lets the model stop or keep searching.",
     )
+    parser.add_argument(
+        "--eval-regime",
+        choices=["multihop", "singlehop", "noisy"],
+        default="multihop",
+        help=(
+            "Evaluation regime. multihop uses the original book->author->birthplace task; "
+            "singlehop asks directly for a person's birthplace; noisy adds a high-ranking "
+            "wrong birthplace result before the correct one."
+        ),
+    )
     parser.add_argument("--lambda-ig", type=float, default=0.5)
     parser.add_argument("--tau", type=float, default=0.7)
     parser.add_argument("--curvature-eps", type=float, default=1e-3)
@@ -598,15 +687,20 @@ def main() -> None:
     cases = [make_case(case_id, rng) for case_id in range(args.num_examples)]
 
     for case_idx, case in enumerate(cases):
-        search_index = unique_results([sample.completion for sample in case.samples])
+        user_case_prompt, search_index = build_regime_case(case, args.eval_regime, rng)
         if args.one_shot:
-            user_prompt = build_generation_prompt(case.prompt, search_index)
+            user_prompt = build_generation_prompt(user_case_prompt, search_index)
         elif args.rollout_mode == "flexible":
-            user_prompt = build_flexible_tool_loop_prompt(
-                case.prompt, max_search_turns=args.max_search_turns
-            )
+            if args.eval_regime == "singlehop":
+                user_prompt = build_singlehop_flexible_tool_loop_prompt(
+                    user_case_prompt, max_search_turns=args.max_search_turns
+                )
+            else:
+                user_prompt = build_flexible_tool_loop_prompt(
+                    user_case_prompt, max_search_turns=args.max_search_turns
+                )
         else:
-            user_prompt = build_tool_loop_prompt(case.prompt)
+            user_prompt = build_tool_loop_prompt(user_case_prompt)
         generation_prompt = format_prompt(
             scorer=scorer,
             user_prompt=user_prompt,
@@ -664,6 +758,7 @@ def main() -> None:
                 {
                     "case_id": case_idx,
                     "sample_id": sample.sample_id,
+                    "eval_regime": args.eval_regime,
                     "bucket": bucket,
                     "answer": case.answer,
                     "prediction": extract_answer(sample.completion)

@@ -94,3 +94,22 @@ useful-minus-redundant gap and the best balance of correctness and useful
 search. A-TGPO proxy remains a strong baseline. The current reward-gated
 efficiency variant is not reliable on this held-out seed and should be treated
 as an ablation rather than the main method.
+
+## Noisy/Distractor 5x2 Evaluation
+
+We also evaluated the same five loaded models in a noisy/distractor regime where
+the search index presents a wrong birthplace result before the correct one. This
+is a harsh robustness test for a small model.
+
+| loaded model | useful | redundant | distractor | correct | useful-red |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base Qwen | 0.000 | 0.000 | 1.000 | 0.000 | +0.000 |
+| reward_tpo LoRA | 0.000 | 0.000 | 1.000 | 0.000 | +0.000 |
+| prefixig_tpo LoRA | 0.111 | 0.000 | 0.889 | 0.111 | +0.111 |
+| prefixig_tpo_rg_eff LoRA | 0.000 | 0.000 | 1.000 | 0.000 | +0.000 |
+| atgpo_proxy LoRA | 0.090 | 0.000 | 0.910 | 0.090 | +0.090 |
+
+All methods mostly fail under this adversarial retrieval ordering. PrefixIG-TPO
+is the only method with a clear improvement over base and reward-only, and it is
+slightly ahead of the A-TGPO proxy on this seed. This should be reported as a
+stress-test result, not as the main Qwen LoRA performance claim.

@@ -510,6 +510,32 @@ Interpretation:
 Next: repeat this comparison over additional seeds before making a paper-scale
 claim.
 
+### Qwen LoRA Noisy/Distractor Stress Test
+
+We added an MLX generated-policy `--eval-regime noisy` setting. It places a
+wrong birthplace result before the correct birthplace result, testing whether a
+model can avoid following a plausible but bad retrieved fact.
+
+```text
+model                    correct | useful | redundant | distractor | useful-red
+Base Qwen                0.000   | 0.000  | 0.000     | 1.000      | +0.000
+reward_tpo LoRA          0.000   | 0.000  | 0.000     | 1.000      | +0.000
+prefixig_tpo LoRA        0.111   | 0.111  | 0.000     | 0.889      | +0.111
+prefixig_tpo_rg_eff LoRA 0.000   | 0.000  | 0.000     | 1.000      | +0.000
+atgpo_proxy LoRA         0.090   | 0.090  | 0.000     | 0.910      | +0.090
+```
+
+Interpretation:
+
+- This noisy ordering is too hard for the current small offline-distilled
+  adapters; all methods mostly follow the distractor.
+- PrefixIG-TPO is the only method that clearly rises above base and reward-only.
+- A-TGPO proxy is close but slightly below PrefixIG-TPO on this seed.
+- This belongs in the paper as a stress-test table, not the headline result.
+
+Next: run single-hop clean eval, then repeat the multihop/noisy tables over at
+least one additional seed.
+
 ## Recommended Order
 
 ### Step 1

@@ -230,4 +230,17 @@ This held-out pilot gives a more informative pattern. Reward-only TPO distillati
 
 PrefixIG-TPO gives the strongest behavior in this comparison: high correctness, almost all correct mass assigned to useful search, no redundant correct mass, and the largest useful-minus-redundant gap. The A-TGPO proxy is also strong and is an important baseline, but it trails PrefixIG-TPO on both correctness and useful evidence mass in this held-out seed. The reward-gated efficiency variant underperforms here, suggesting that the current efficiency penalty is not yet robust in the real-model LoRA setting. We therefore treat `rg_eff` as an ablation rather than the main method for the current paper story.
 
+We also ran a noisy/distractor stress test with the same 5-example, 2-sample, seed-101 setup. In this regime, the search index places a wrong birthplace result before the correct one, so the model must avoid following the first plausible retrieved fact. This is intentionally harsh for a small model and should be interpreted as a robustness diagnostic rather than the main performance table:
+
+```text
+model                    useful  redundant  no_search  distractor  other  correct  useful-red
+Base Qwen                0.000   0.000      0.000      1.000       0.000  0.000    +0.000
+reward_tpo LoRA          0.000   0.000      0.000      1.000       0.000  0.000    +0.000
+prefixig_tpo LoRA        0.111   0.000      0.000      0.889       0.000  0.111    +0.111
+prefixig_tpo_rg_eff LoRA 0.000   0.000      0.000      1.000       0.000  0.000    +0.000
+atgpo_proxy LoRA         0.090   0.000      0.000      0.910       0.000  0.090    +0.090
+```
+
+The noisy result shows that all current small LoRA models mostly follow the distractor evidence. However, PrefixIG-TPO is the only method that clearly improves over base and reward-only in this stress test, and it slightly exceeds the A-TGPO proxy. This supports keeping noisy retrieval as a robustness benchmark, but it also shows that the present offline SFT distillation setup is not yet sufficient for strong distractor resistance.
+
 Overall, the experiments so far support a clear story. Final reward teaches correctness but not evidence efficiency. PrefixIG provides useful intermediate credit. TPO target construction uses that signal directly by redistributing probability mass among competing trajectories. A-TGPO-style token credit is a strong baseline, and the current evidence does not support claiming that we beat it in all settings. Instead, the strongest current claim is that PrefixIG-TPO is a simple, Mac-feasible target-policy method that improves generated evidence behavior over reward-only training and is competitive with an A-TGPO proxy baseline. The next empirical milestone is to repeat the Qwen LoRA evaluation across more seeds and then replace SFT distillation with a true offline TPO trainer over grouped trajectory targets.
