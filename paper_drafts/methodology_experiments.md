@@ -409,3 +409,18 @@ noisy       online PrefixIG-TPO+anchor 0.902    0.902   0.000      0.098       +
 This is the first result in which a non-SFT-main-objective version of our method is competitive with the A-TGPO proxy across all regimes. The online PrefixIG-TPO+anchor adapter substantially outperforms A-TGPO proxy on single-hop, slightly outperforms it on multi-hop, and improves noisy retrieval from `0.800` to `0.902` useful/correct. This is important because the previous true-offline-TPO variants were usually behind A-TGPO on multi-hop and noisy retrieval.
 
 At the same time, the online update is not yet better than the weighted-SFT warm start on clean single-hop and multi-hop. This makes the result a promising algorithmic direction rather than a final headline. The lesson is that online rollout refresh plus a token/action anchor fixes the collapse seen in pure offline TPO, but the update strength still needs tuning. The next pass should reduce the learning rate or number of updates, or increase `beta`, so the online method keeps the weighted-SFT adapter's clean-regime behavior while preserving the noisy-retrieval gain.
+
+We then ran a small anchor-strength sweep while keeping the online rollout and update schedule fixed. A weak anchor (`beta=0.02`) underperformed, especially on multi-hop. Increasing the token/action anchor to `beta=0.10` preserved the clean-regime behavior and retained the noisy-retrieval improvement:
+
+```text
+anchor beta  regime      correct  useful  redundant  distractor  useful-red
+0.02         single-hop  0.896    0.696   0.200      0.104       +0.496
+0.02         multi-hop   0.402    0.402   0.000      0.598       +0.402
+0.02         noisy       0.702    0.702   0.000      0.298       +0.702
+
+0.10         single-hop  1.000    0.800   0.200      0.000       +0.600
+0.10         multi-hop   1.000    1.000   0.000      0.000       +1.000
+0.10         noisy       1.000    1.000   0.000      0.000       +1.000
+```
+
+This sweep changes the interpretation of the online result: the earlier `beta=0.05` setting showed the method was viable and competitive with A-TGPO, while `beta=0.10` shows that the token/action anchor can recover the weighted-SFT adapter's clean-regime performance and improve noisy retrieval in the same run. The sample size is still small, so the next step is to repeat this setting with more held-out prompts and seeds.

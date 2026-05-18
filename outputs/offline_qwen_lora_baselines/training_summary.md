@@ -363,3 +363,25 @@ The limitation is that this first online setting hurts the very strong
 weighted-SFT warm start on single-hop and multi-hop. The next tuning pass should
 reduce update strength or increase anchoring, then repeat this same three-regime
 comparison.
+
+### Anchor-Beta Sweep
+
+We ran a small sweep over the token/action anchor weight while keeping the
+online schedule fixed. The weak-anchor setting (`beta=0.02`) was unstable on
+multi-hop and noisy prompts. Increasing the anchor to `beta=0.10` preserved the
+clean-regime behavior and improved noisy retrieval.
+
+| anchor beta | regime | correct | useful | redundant | distractor | useful-red |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 0.02 | single-hop | 0.896 | 0.696 | 0.200 | 0.104 | +0.496 |
+| 0.02 | multi-hop | 0.402 | 0.402 | 0.000 | 0.598 | +0.402 |
+| 0.02 | noisy | 0.702 | 0.702 | 0.000 | 0.298 | +0.702 |
+| 0.10 | single-hop | 1.000 | 0.800 | 0.200 | 0.000 | +0.600 |
+| 0.10 | multi-hop | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+| 0.10 | noisy | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+
+Interpretation: the anchor is not just a stabilizer in principle; its strength
+controls whether the online update preserves the action language and clean
+multi-hop behavior. The `beta=0.10` pilot is the strongest online result so far,
+but it should be repeated with more held-out prompts and seeds before being used
+as a final headline.
