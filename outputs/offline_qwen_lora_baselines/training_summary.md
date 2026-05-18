@@ -189,3 +189,78 @@ multi-hop but poor on single-hop. Neither mixed-hop adapter solves the noisy
 distractor regime. The next real-model step should therefore be a larger,
 balanced mixed-hop target set and a dedicated noisy-retrieval training split
 rather than relying on hop mixing alone.
+
+## Mixed-Hop + Noisy Qwen LoRA Follow-Up
+
+We then added an explicit mixed-hop + noisy training regime. This regime cycles
+single-hop, multi-hop, and noisy/distractor cases during offline target
+construction. The first version was not trainable: because the base model rarely
+sampled useful noisy trajectories, more than half of the target mass remained on
+`distractor_wrong`. We therefore made two targeted changes:
+
+- The noisy retriever now returns tied birthplace evidence together, preserving
+  the intended setting of misleading evidence before corrective evidence rather
+  than an impossible one-result retrieval failure.
+- The offline target builder can add useful-correct oracle anchors to each
+  candidate group with `--oracle-anchor-count`, ensuring the target policy has
+  positive trajectories to move mass toward.
+
+With 18 prompts, 4 generated samples per prompt, 2 useful-correct oracle anchors
+per prompt, and 8 SFT draws per prompt, the corrected target distributions were:
+
+| target method | useful_correct | redundant_correct | distractor_wrong |
+| --- | ---: | ---: | ---: |
+| prefixig_tpo_mixedhop_noisy | 0.804 | 0.083 | 0.113 |
+| atgpo_proxy_mixedhop_noisy | 0.776 | 0.096 | 0.128 |
+
+Both adapters used the same Qwen2.5-0.5B 4-bit LoRA setup as before. Training
+results:
+
+| adapter | final train loss | final validation loss | peak memory |
+| --- | ---: | ---: | ---: |
+| `outputs/adapters/offline_prefixig_tpo_mixedhop_noisy_qwen_lora` | 0.038 | 0.247 | 1.291GB |
+| `outputs/adapters/offline_atgpo_proxy_mixedhop_noisy_qwen_lora` | 0.089 | 0.081 | 1.275GB |
+
+Held-out single-hop:
+
+| loaded model | useful | redundant | distractor | correct | useful-red |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base Qwen | 0.724 | 0.200 | 0.076 | 0.924 | +0.524 |
+| reward_tpo LoRA | 0.800 | 0.200 | 0.000 | 1.000 | +0.600 |
+| prefixig_tpo LoRA | 0.382 | 0.618 | 0.000 | 1.000 | -0.236 |
+| atgpo_proxy LoRA | 0.902 | 0.098 | 0.000 | 1.000 | +0.804 |
+| prefixig_tpo_mixedhop LoRA | 1.000 | 0.000 | 0.000 | 1.000 | +1.000 |
+| prefixig_tpo_mixedhop_noisy LoRA | 0.800 | 0.200 | 0.000 | 1.000 | +0.600 |
+| atgpo_proxy_mixedhop_noisy LoRA | 0.526 | 0.000 | 0.474 | 0.526 | +0.526 |
+
+Held-out multi-hop:
+
+| loaded model | useful | redundant | distractor | correct | useful-red |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base Qwen | 0.174 | 0.000 | 0.826 | 0.174 | +0.174 |
+| reward_tpo LoRA | 0.600 | 0.400 | 0.000 | 1.000 | +0.200 |
+| prefixig_tpo LoRA | 0.914 | 0.000 | 0.086 | 0.914 | +0.914 |
+| atgpo_proxy LoRA | 0.801 | 0.000 | 0.199 | 0.801 | +0.801 |
+| prefixig_tpo_mixedhop LoRA | 0.305 | 0.000 | 0.695 | 0.305 | +0.305 |
+| prefixig_tpo_mixedhop_noisy LoRA | 1.000 | 0.000 | 0.000 | 1.000 | +1.000 |
+| atgpo_proxy_mixedhop_noisy LoRA | 0.800 | 0.000 | 0.200 | 0.800 | +0.800 |
+
+Corrected noisy/distractor:
+
+| loaded model | useful | redundant | distractor | correct | useful-red |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base Qwen | 0.093 | 0.000 | 0.907 | 0.093 | +0.093 |
+| reward_tpo LoRA | 0.200 | 0.400 | 0.400 | 0.600 | -0.200 |
+| prefixig_tpo LoRA | 0.505 | 0.200 | 0.295 | 0.705 | +0.305 |
+| atgpo_proxy LoRA | 0.400 | 0.196 | 0.404 | 0.596 | +0.204 |
+| prefixig_tpo_mixedhop_noisy LoRA | 0.800 | 0.000 | 0.200 | 0.800 | +0.800 |
+| atgpo_proxy_mixedhop_noisy LoRA | 0.800 | 0.000 | 0.200 | 0.800 | +0.800 |
+
+This is the strongest Qwen LoRA result so far. The PrefixIG-TPO mixed-hop+noisy
+adapter preserves perfect correctness on single-hop and multi-hop while sharply
+improving noisy retrieval behavior. Unlike reward-only training, it does not
+shift mass into redundant correct search under noisy retrieval. The A-TGPO proxy
+matches the noisy score, but is weaker on single-hop and multi-hop in this seed.
+Because the experiment uses only 5 held-out prompts per regime, this is still a
+pilot result; the next step is to repeat it across more seeds and a larger
+held-out set.

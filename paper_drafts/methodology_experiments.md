@@ -288,3 +288,52 @@ atgpo_proxy_mixedhop       0.000   0.105      0.895       0.105    -0.105
 The mixed-hop experiment is encouraging, but in a specific way. PrefixIG-TPO mixed-hop fixes the single-hop over-search failure completely in this small evaluation: useful-minus-redundant moves from `-0.236` to `+1.000` while correctness remains perfect. This supports the idea that PrefixIG-TPO can learn concise useful search when the training target distribution includes the relevant regime. However, the same mixed-hop adapter loses the strong multi-hop behavior of the original PrefixIG-TPO adapter. The A-TGPO proxy mixed-hop adapter shows the opposite tradeoff: it is strong on multi-hop but poor on single-hop.
 
 The noisy/distractor result remains a negative stress test for all current small LoRA adapters. Mixing single-hop and multi-hop trajectories is not enough to teach distractor resistance. For the next real-model experiment, we should build a larger balanced target set with an explicit noisy-retrieval split, then train one PrefixIG-TPO adapter and one A-TGPO proxy adapter under the same data budget. This would directly test whether the target-policy construction can learn to reject misleading evidence rather than merely adapting to hop count.
+
+### Mixed-Hop + Noisy Qwen LoRA
+
+We then ran the direct follow-up: a mixed-hop + noisy training regime that cycles single-hop, multi-hop, and noisy/distractor cases. This required one correction to the noisy environment. The previous noisy retriever returned only the first high-ranking wrong birthplace fact, which made many cases closer to impossible retrieval than distractor robustness. We changed the retriever so tied birthplace matches return misleading and corrective evidence together, preserving the intended challenge: the model sees a wrong fact before a correct fact and must still answer from the useful evidence.
+
+The first target build still had too much distractor mass, because the base model rarely sampled useful noisy trajectories. We therefore added useful-correct oracle anchors to each candidate group during offline target construction. With 18 prompts, 4 generated samples per prompt, 2 oracle anchors per prompt, and 8 SFT draws per prompt, the resulting target distributions were strongly useful-correct:
+
+```text
+target method                  useful  redundant  distractor
+prefixig_tpo_mixedhop_noisy    0.804   0.083      0.113
+atgpo_proxy_mixedhop_noisy     0.776   0.096      0.128
+```
+
+Both adapters trained successfully on the same Mac-feasible Qwen2.5-0.5B 4-bit LoRA setup. PrefixIG-TPO mixed-hop+noisy reached final training loss `0.038` and validation loss `0.247`. A-TGPO proxy mixed-hop+noisy reached final training loss `0.089` and validation loss `0.081`.
+
+The held-out generated-policy results are the strongest real-model results so far:
+
+```text
+Single-hop, 5 examples x 2 samples, seed 101
+model                            useful  redundant  distractor  correct  useful-red
+Base Qwen                        0.724   0.200      0.076       0.924    +0.524
+reward_tpo LoRA                  0.800   0.200      0.000       1.000    +0.600
+prefixig_tpo LoRA                0.382   0.618      0.000       1.000    -0.236
+atgpo_proxy LoRA                 0.902   0.098      0.000       1.000    +0.804
+prefixig_tpo_mixedhop            1.000   0.000      0.000       1.000    +1.000
+prefixig_tpo_mixedhop_noisy      0.800   0.200      0.000       1.000    +0.600
+atgpo_proxy_mixedhop_noisy       0.526   0.000      0.474       0.526    +0.526
+
+Multi-hop, 5 examples x 2 samples, seed 101
+model                            useful  redundant  distractor  correct  useful-red
+Base Qwen                        0.174   0.000      0.826       0.174    +0.174
+reward_tpo LoRA                  0.600   0.400      0.000       1.000    +0.200
+prefixig_tpo LoRA                0.914   0.000      0.086       0.914    +0.914
+atgpo_proxy LoRA                 0.801   0.000      0.199       0.801    +0.801
+prefixig_tpo_mixedhop            0.305   0.000      0.695       0.305    +0.305
+prefixig_tpo_mixedhop_noisy      1.000   0.000      0.000       1.000    +1.000
+atgpo_proxy_mixedhop_noisy       0.800   0.000      0.200       0.800    +0.800
+
+Corrected noisy/distractor, 5 examples x 2 samples, seed 101
+model                            useful  redundant  distractor  correct  useful-red
+Base Qwen                        0.093   0.000      0.907       0.093    +0.093
+reward_tpo LoRA                  0.200   0.400      0.400       0.600    -0.200
+prefixig_tpo LoRA                0.505   0.200      0.295       0.705    +0.305
+atgpo_proxy LoRA                 0.400   0.196      0.404       0.596    +0.204
+prefixig_tpo_mixedhop_noisy      0.800   0.000      0.200       0.800    +0.800
+atgpo_proxy_mixedhop_noisy       0.800   0.000      0.200       0.800    +0.800
+```
+
+This result changes the paper story in a good way. The earlier PrefixIG-TPO adapter was strong on multi-hop but brittle across regimes. The mixed-hop+noisy PrefixIG-TPO adapter is balanced: it preserves perfect correctness on single-hop and multi-hop while substantially improving noisy retrieval. It also avoids the reward-only failure mode where noisy correctness comes with redundant search. The A-TGPO proxy matches PrefixIG-TPO on the corrected noisy split, but is weaker on single-hop and multi-hop in this seed. Because this is still a 5-prompt-per-regime pilot, the right next step is multi-seed evaluation and a larger held-out set, not a stronger claim yet.

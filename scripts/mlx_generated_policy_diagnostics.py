@@ -230,6 +230,7 @@ def lexical_result(query: str, search_index: list[str]) -> str:
     }
     best_doc = search_index[0] if search_index else "Page 1: No result found."
     best_score = -1
+    scored_docs = []
     for doc in search_index:
         doc_terms = set(re.findall(r"[a-z0-9]+", doc.lower()))
         score = len(query_terms & doc_terms)
@@ -237,9 +238,18 @@ def lexical_result(query: str, search_index: list[str]) -> str:
             score += 3
         if "author" in query.lower() and "written by" in doc.lower():
             score += 3
+        scored_docs.append((score, doc))
         if score > best_score:
             best_score = score
             best_doc = doc
+    if "birth" in query.lower():
+        tied_birth_docs = [
+            doc
+            for score, doc in scored_docs
+            if score == best_score and " was born in " in doc
+        ]
+        if len(tied_birth_docs) >= 2:
+            return "\n".join(tied_birth_docs[:2])
     return best_doc
 
 

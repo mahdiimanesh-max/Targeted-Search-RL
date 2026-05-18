@@ -35,8 +35,10 @@ from mlx_generated_policy_diagnostics import (  # noqa: E402
     build_singlehop_flexible_tool_loop_prompt,
     build_tool_loop_prompt,
     classify_generated_sample,
+    extract_case_facts,
     format_prompt,
     generate_completion,
+    lexical_result,
     rollout_with_oracle_search,
     unique_results,
     write_jsonl,
@@ -193,17 +195,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Use one-shot generation instead of the oracle search loop.",
     )
     parser.add_argument(
+        "--oracle-anchor-count",
+        type=int,
+        default=0,
+        help=(
+            "Add this many canonical useful-correct trajectories to each candidate "
+            "group before target weighting. Useful for noisy regimes where the base "
+            "model may not sample enough positive trajectories."
+        ),
+    )
+    parser.add_argument(
         "--rollout-mode",
         choices=["guided", "flexible"],
         default="flexible",
     )
     parser.add_argument(
         "--eval-regime",
-        choices=["multihop", "singlehop", "mixedhop", "noisy"],
+        choices=["multihop", "singlehop", "mixedhop", "noisy", "mixedhop_noisy"],
         default="multihop",
         help=(
             "Training data regime. mixedhop alternates single-hop and multi-hop "
-            "cases; noisy uses the noisy/distractor search index."
+            "cases; noisy uses the noisy/distractor search index; mixedhop_noisy "
+            "cycles single-hop, multi-hop, and noisy cases."
         ),
     )
     parser.add_argument("--lambda-ig", type=float, default=0.5)
@@ -281,7 +294,37 @@ def compute_target_diags(method: str, generated_samples: list[Sample], scorer, a
 def case_regime(eval_regime: str, case_idx: int) -> str:
     if eval_regime == "mixedhop":
         return "singlehop" if case_idx % 2 == 0 else "multihop"
+    if eval_regime == "mixedhop_noisy":
+        return ["singlehop", "multihop", "noisy"][case_idx % 3]
     return eval_regime
+
+
+def first_matching_doc(search_index: list[str], needle: str) -> str:
+    for doc in search_index:
+        if needle in doc:
+            return doc
+    return search_index[0] if search_index else "Page 1: No result found."
+
+
+def build_oracle_anchor_completion(case, active_regime: str, search_index: list[str]) -> str:
+    book, person, city, _ = extract_case_facts(case)
+    birth_result = lexical_result(f"{person} birthplace", search_index)
+
+    if active_regime == "singlehop":
+        return (
+            f"<search>{person} birthplace</search>\n"
+            f"<result>{birth_result}</result>\n"
+            f"<answer>\\boxed{{{city}}}</answer>"
+        )
+
+    author_result = first_matching_doc(search_index, " was written by ")
+    return (
+        f"<search>{book} author</search>\n"
+        f"<result>{author_result}</result>\n"
+        f"<search>{person} birthplace</search>\n"
+        f"<result>{birth_result}</result>\n"
+        f"<answer>\\boxed{{{city}}}</answer>"
+    )
 
 
 def group_records_by_case(records: list[dict]) -> dict[int, list[dict]]:
@@ -545,6 +588,19 @@ def main() -> None:
             generated_samples.append(
                 Sample(
                     sample_id=f"case{case_idx:04d}_gen{sample_idx:02d}",
+                    prompt=generation_prompt,
+                    completion=completion,
+                    answer=case.answer,
+                    old_logp=old_logp,
+                )
+            )
+
+        for anchor_idx in range(args.oracle_anchor_count):
+            completion = build_oracle_anchor_completion(case, active_regime, search_index)
+            old_logp = scorer.completion_mean_logp(generation_prompt, completion)
+            generated_samples.append(
+                Sample(
+                    sample_id=f"case{case_idx:04d}_oracle{anchor_idx:02d}",
                     prompt=generation_prompt,
                     completion=completion,
                     answer=case.answer,
