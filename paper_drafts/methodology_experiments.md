@@ -372,3 +372,40 @@ corrected noisy   PrefixIG-TPO SFT-warm true-TPO 0.419    0.337   0.082      0.5
 ```
 
 This should be treated as a useful negative pilot rather than a final result. The grouped TPO objective directly optimizes the distributional claim we want, but by itself it is under-constrained for generation quality and format preservation. The next implementation should use a hybrid objective: offline TPO over groups plus an SFT or KL anchor on high-target trajectories. That would test the paper's central hypothesis while preserving the behavioral benefits of the current weighted-SFT adapter.
+
+### Online PrefixIG-TPO With Token/Action Anchor
+
+The offline TPO failure suggests that target-policy matching should be tested in the online setting used by TPO-style RL. We therefore implemented an online PrefixIG-TPO pilot. The model is warm-started from the strongest PrefixIG-TPO weighted-SFT adapter. Each online iteration samples fresh rollouts from the current policy, scores them with final reward and PrefixIG, constructs the target distribution
+
+```text
+q(y | x) proportional to pi_old(y | x) exp(U(y) / tau),
+```
+
+and updates the LoRA adapter with a grouped TPO cross-entropy. To prevent the action language from drifting, the update includes a small token/action behavior anchor: a target-weighted token negative log-likelihood over the freshly sampled trajectories.
+
+```text
+loss = grouped PrefixIG-TPO loss + beta * weighted token/action NLL
+```
+
+This is not the same as the earlier offline weighted-SFT baseline: the rollouts are refreshed from the current policy after each online round. The pilot used Qwen2.5-0.5B 4-bit LoRA, the mixed-hop+noisy regime, 5 online iterations, 2 prompts per iteration, 3 samples per prompt, 2 update steps per iteration, learning rate `1e-5`, and anchor weight `0.05`. Peak memory was about `7.5GB`.
+
+Held-out generated-policy comparison:
+
+```text
+regime      model                      correct  useful  redundant  distractor  useful-red
+single-hop  PrefixIG-TPO weighted-SFT  1.000    0.800   0.200      0.000       +0.600
+single-hop  A-TGPO proxy               0.526    0.526   0.000      0.474       +0.526
+single-hop  online PrefixIG-TPO+anchor 0.898    0.698   0.200      0.102       +0.498
+
+multi-hop   PrefixIG-TPO weighted-SFT  1.000    1.000   0.000      0.000       +1.000
+multi-hop   A-TGPO proxy               0.800    0.800   0.000      0.200       +0.800
+multi-hop   online PrefixIG-TPO+anchor 0.804    0.804   0.000      0.196       +0.804
+
+noisy       PrefixIG-TPO weighted-SFT  0.800    0.800   0.000      0.200       +0.800
+noisy       A-TGPO proxy               0.800    0.800   0.000      0.200       +0.800
+noisy       online PrefixIG-TPO+anchor 0.902    0.902   0.000      0.098       +0.902
+```
+
+This is the first result in which a non-SFT-main-objective version of our method is competitive with the A-TGPO proxy across all regimes. The online PrefixIG-TPO+anchor adapter substantially outperforms A-TGPO proxy on single-hop, slightly outperforms it on multi-hop, and improves noisy retrieval from `0.800` to `0.902` useful/correct. This is important because the previous true-offline-TPO variants were usually behind A-TGPO on multi-hop and noisy retrieval.
+
+At the same time, the online update is not yet better than the weighted-SFT warm start on clean single-hop and multi-hop. This makes the result a promising algorithmic direction rather than a final headline. The lesson is that online rollout refresh plus a token/action anchor fixes the collapse seen in pure offline TPO, but the update strength still needs tuning. The next pass should reduce the learning rate or number of updates, or increase `beta`, so the online method keeps the weighted-SFT adapter's clean-regime behavior while preserving the noisy-retrieval gain.

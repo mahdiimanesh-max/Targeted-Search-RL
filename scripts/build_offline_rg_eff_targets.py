@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -46,6 +47,7 @@ from mlx_generated_policy_diagnostics import (  # noqa: E402
 from mlx_real_policy_diagnostics import MLXPolicyScorer  # noqa: E402
 from prefix_ig_tpo_smoke import (  # noqa: E402
     Sample,
+    SampleDiagnostics,
     compute_diagnostics,
     extract_answer,
     extract_boxed,
@@ -58,7 +60,11 @@ TARGET_METHODS = {
     "atgpo_proxy",
     "reward_tpo",
     "prefixig_tpo",
+    "prefixig_tpo_curv",
+    "prefixig_tpo_eff",
     "prefixig_tpo_rg_eff",
+    "prefixig_tpo_curv_eff",
+    "prefixig_tpo_curv_rg_eff",
 }
 
 
@@ -68,8 +74,16 @@ def parse_target_methods(raw: str) -> list[str]:
         "atgpo_components": "atgpo_proxy",
         "a-tgpo-components": "atgpo_proxy",
         "final_reward_tpo": "reward_tpo",
+        "curv": "prefixig_tpo_curv",
+        "prefixig_tpo+curv": "prefixig_tpo_curv",
+        "eff": "prefixig_tpo_eff",
+        "prefixig_tpo+eff": "prefixig_tpo_eff",
         "rg_eff": "prefixig_tpo_rg_eff",
         "prefixig_tpo+rg_eff": "prefixig_tpo_rg_eff",
+        "curv_eff": "prefixig_tpo_curv_eff",
+        "prefixig_tpo+curv+eff": "prefixig_tpo_curv_eff",
+        "curv_rg_eff": "prefixig_tpo_curv_rg_eff",
+        "prefixig_tpo+curv+rg_eff": "prefixig_tpo_curv_rg_eff",
     }
     methods = []
     for item in raw.split(","):
@@ -169,7 +183,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="prefixig_tpo_rg_eff",
         help=(
             "Comma-separated target datasets to build. Supported: "
-            "reward_tpo,prefixig_tpo,prefixig_tpo_rg_eff,atgpo_proxy. When "
+            "reward_tpo,prefixig_tpo,prefixig_tpo_curv,prefixig_tpo_eff,"
+            "prefixig_tpo_rg_eff,prefixig_tpo_curv_eff,"
+            "prefixig_tpo_curv_rg_eff,atgpo_proxy. When "
             "more than one method is requested, each dataset is written under "
             "output-dir/METHOD."
         ),
@@ -258,13 +274,31 @@ def compute_target_diags(method: str, generated_samples: list[Sample], scorer, a
     )
     if method == "prefixig_tpo":
         return base_diags
-    if method == "prefixig_tpo_rg_eff":
+
+    if method in {"prefixig_tpo_curv", "prefixig_tpo_curv_eff", "prefixig_tpo_curv_rg_eff"}:
+        base_diags = compute_diagnostics(
+            samples=generated_samples,
+            scorer=scorer,
+            lambda_ig=args.lambda_ig,
+            tau=args.tau,
+            curvature_eps=args.curvature_eps,
+            apply_curvature=True,
+        )
+    if method == "prefixig_tpo_curv":
+        return base_diags
+
+    if method in {
+        "prefixig_tpo_eff",
+        "prefixig_tpo_rg_eff",
+        "prefixig_tpo_curv_eff",
+        "prefixig_tpo_curv_rg_eff",
+    }:
         return apply_efficiency_penalty(
             diags=base_diags,
             samples=generated_samples,
             tau=args.tau,
-            apply_curvature=False,
-            reward_gated=True,
+            apply_curvature=method in {"prefixig_tpo_curv_eff", "prefixig_tpo_curv_rg_eff"},
+            reward_gated=method in {"prefixig_tpo_rg_eff", "prefixig_tpo_curv_rg_eff"},
             curvature_eps=args.curvature_eps,
             optimal_turns=args.eff_optimal_turns,
             repeat_threshold=args.eff_repeat_threshold,
@@ -382,6 +416,86 @@ def cached_atgpo_proxy_records(records: list[dict], scorer, args) -> list[dict]:
     return out
 
 
+def source_rollout_records(records: list[dict]) -> list[dict]:
+    """Select one trajectory set when cached records contain multiple targets."""
+    methods = {record.get("target_method") for record in records}
+    if len(methods) <= 1:
+        return records
+    preferred = "prefixig_tpo" if "prefixig_tpo" in methods else sorted(str(m) for m in methods)[0]
+    return [record for record in records if record.get("target_method") == preferred]
+
+
+def cached_base_diagnostics(
+    records: list[dict],
+    args,
+    apply_curvature: bool,
+) -> tuple[list[Sample], list[SampleDiagnostics]]:
+    prefix_igs = [float(record.get("prefix_ig", 0.0)) for record in records]
+    ig_mean, ig_std = mean_std(prefix_igs)
+    old_policy_probs = softmax([float(record["old_logp"]) for record in records])
+    samples = []
+    diags = []
+    for record, old_policy_prob in zip(records, old_policy_probs):
+        reward = float(record.get("reward", 0.0))
+        prefix_ig = float(record.get("prefix_ig", 0.0))
+        normalized_ig = (prefix_ig - ig_mean) / ig_std
+        curvature = float(record.get("curvature", old_policy_prob * (1.0 - old_policy_prob)))
+        ig_term = args.lambda_ig * normalized_ig
+        if apply_curvature:
+            ig_term = ig_term / math.sqrt(curvature + args.curvature_eps)
+        utility = reward + ig_term
+        samples.append(
+            Sample(
+                sample_id=str(record["sample_id"]),
+                prompt=str(record["prompt"]),
+                completion=str(record["completion"]),
+                answer=str(record["answer"]),
+                old_logp=float(record["old_logp"]),
+            )
+        )
+        diags.append(
+            SampleDiagnostics(
+                sample_id=str(record["sample_id"]),
+                final_reward=reward,
+                exact_match=reward,
+                token_f1=reward,
+                prefix_ig=prefix_ig,
+                normalized_ig=normalized_ig,
+                utility=utility,
+                old_policy_prob=old_policy_prob,
+                target_weight=0.0,
+                curvature=curvature,
+                num_turns=len(record.get("turn_igs", [])),
+                predicted_answer=str(record.get("prediction", "")),
+                turn_igs=tuple(float(value) for value in record.get("turn_igs", [])),
+            )
+        )
+    return samples, diags
+
+
+def cached_target_records_from_diags(
+    method: str,
+    records: list[dict],
+    diags: list[SampleDiagnostics],
+    samples: list[Sample],
+    args,
+) -> list[dict]:
+    weights = softmax(
+        [
+            sample.old_logp + diag.utility / max(args.tau, 1e-8)
+            for sample, diag in zip(samples, diags)
+        ]
+    )
+    out = []
+    for record, diag, weight in zip(records, diags, weights):
+        copied = dict(record)
+        copied["target_method"] = method
+        copied["utility"] = diag.utility
+        copied["target_weight"] = weight
+        out.append(copied)
+    return out
+
+
 def cached_method_records(method: str, records: list[dict], args, scorer=None) -> list[dict]:
     if method == "atgpo_proxy":
         if scorer is None:
@@ -391,6 +505,52 @@ def cached_method_records(method: str, records: list[dict], args, scorer=None) -
     by_case = group_records_by_case(records)
     out: list[dict] = []
     for _case_id, case_records in sorted(by_case.items()):
+        if method in {
+            "prefixig_tpo_curv",
+            "prefixig_tpo_eff",
+            "prefixig_tpo_rg_eff",
+            "prefixig_tpo_curv_eff",
+            "prefixig_tpo_curv_rg_eff",
+        }:
+            apply_curv = method in {
+                "prefixig_tpo_curv",
+                "prefixig_tpo_curv_eff",
+                "prefixig_tpo_curv_rg_eff",
+            }
+            samples, base_diags = cached_base_diagnostics(
+                case_records, args, apply_curvature=apply_curv
+            )
+            if method == "prefixig_tpo_curv":
+                out.extend(
+                    cached_target_records_from_diags(
+                        method, case_records, base_diags, samples, args
+                    )
+                )
+                continue
+
+            adjusted_diags = apply_efficiency_penalty(
+                diags=base_diags,
+                samples=samples,
+                tau=args.tau,
+                apply_curvature=method
+                in {"prefixig_tpo_curv_eff", "prefixig_tpo_curv_rg_eff"},
+                reward_gated=method
+                in {"prefixig_tpo_rg_eff", "prefixig_tpo_curv_rg_eff"},
+                curvature_eps=args.curvature_eps,
+                optimal_turns=args.eff_optimal_turns,
+                repeat_threshold=args.eff_repeat_threshold,
+                min_turn_ig=args.eff_min_turn_ig,
+                lambda_extra_turn=args.eff_lambda_extra_turn,
+                lambda_repeat_query=args.eff_lambda_repeat_query,
+                lambda_low_ig=args.eff_lambda_low_ig,
+            )
+            out.extend(
+                cached_target_records_from_diags(
+                    method, case_records, adjusted_diags, samples, args
+                )
+            )
+            continue
+
         prefix_igs = [float(record.get("prefix_ig", 0.0)) for record in case_records]
         ig_mean, ig_std = mean_std(prefix_igs)
         utilities = []
@@ -401,10 +561,6 @@ def cached_method_records(method: str, records: list[dict], args, scorer=None) -
             elif method == "prefixig_tpo":
                 z_ig = (float(record.get("prefix_ig", 0.0)) - ig_mean) / ig_std
                 utility = reward + args.lambda_ig * z_ig
-            elif method == "prefixig_tpo_rg_eff":
-                # Existing pilot candidates were produced by the rg_eff builder.
-                # Reuse the stored utility so all baselines share the same rollouts.
-                utility = float(record.get("utility", reward))
             else:
                 raise ValueError(f"Unknown target method: {method}")
             utilities.append(utility)
@@ -486,7 +642,8 @@ def main() -> None:
     target_methods = parse_target_methods(args.target_methods)
     rng = random.Random(args.seed)
     if args.input_candidates_jsonl:
-        source_records = read_jsonl(Path(args.input_candidates_jsonl))
+        all_source_records = read_jsonl(Path(args.input_candidates_jsonl))
+        source_records = source_rollout_records(all_source_records)
         candidate_records: list[dict] = []
         print(f"Reusing cached candidates from {args.input_candidates_jsonl}")
         print(f"source candidate trajectories: {len(source_records)}")

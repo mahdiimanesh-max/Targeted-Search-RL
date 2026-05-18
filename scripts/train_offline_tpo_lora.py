@@ -37,6 +37,7 @@ class EncodedGroup:
     case_id: int
     eval_regime: str
     trajectories: list[EncodedTrajectory]
+    reference_log_scores: list[float] | None = None
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -186,7 +187,15 @@ def sequence_log_scores(model, inputs, completion_mask, score_normalization: str
     return score_sum, lengths
 
 
-def offline_tpo_loss(model, inputs, completion_mask, q_target, score_normalization: str):
+def offline_tpo_loss(
+    model,
+    inputs,
+    completion_mask,
+    q_target,
+    score_normalization: str,
+    ref_log_scores=None,
+    kl_beta: float = 0.0,
+):
     log_scores, lengths = sequence_log_scores(
         model=model,
         inputs=inputs,
@@ -195,33 +204,76 @@ def offline_tpo_loss(model, inputs, completion_mask, q_target, score_normalizati
     )
     log_p = nn.log_softmax(log_scores, axis=0)
     p = nn.softmax(log_scores, axis=0)
-    loss = -(mx.stop_gradient(q_target) * log_p).sum()
+    tpo_loss = -(mx.stop_gradient(q_target) * log_p).sum()
+    kl_anchor = mx.array(0.0)
+    if ref_log_scores is not None and kl_beta > 0.0:
+        ref_log_p = mx.stop_gradient(nn.log_softmax(ref_log_scores, axis=0))
+        kl_anchor = (p * (log_p - ref_log_p)).sum()
+    loss = tpo_loss + kl_beta * kl_anchor
     policy_entropy = -(p * log_p).sum()
     target_entropy = -(q_target * mx.log(q_target + 1e-12)).sum()
-    return loss, lengths.sum(), policy_entropy, target_entropy
+    return loss, lengths.sum(), policy_entropy, target_entropy, tpo_loss, kl_anchor
+
+
+def reference_group_scores(ref_model, inputs, completion_mask, score_normalization: str):
+    if ref_model is None:
+        return None
+    log_scores, _lengths = sequence_log_scores(
+        model=ref_model,
+        inputs=inputs,
+        completion_mask=completion_mask,
+        score_normalization=score_normalization,
+    )
+    mx.eval(log_scores)
+    return mx.stop_gradient(log_scores)
+
+
+def cached_reference_scores(group: EncodedGroup):
+    if group.reference_log_scores is None:
+        return None
+    return mx.array(group.reference_log_scores, dtype=mx.float32)
+
+
+def precompute_reference_scores(model, groups: list[EncodedGroup], args, label: str) -> None:
+    model.eval()
+    print(f"Precomputing KL reference scores from {label}")
+    for group in tqdm(groups, desc="Reference scores"):
+        inputs, mask, _q, _buckets, norm = make_group_batch(group, args.score_normalization)
+        ref_log_scores = reference_group_scores(model, inputs, mask, norm)
+        group.reference_log_scores = [float(value) for value in ref_log_scores.tolist()]
+    mx.clear_cache()
 
 
 def evaluate(model, groups: list[EncodedGroup], args) -> dict[str, float]:
     if not groups:
-        return {"loss": float("nan"), "policy_entropy": float("nan"), "target_entropy": float("nan")}
+        return {
+            "loss": float("nan"),
+            "policy_entropy": float("nan"),
+            "target_entropy": float("nan"),
+            "kl_anchor": float("nan"),
+        }
     model.eval()
     losses = []
     policy_entropies = []
     target_entropies = []
+    kl_anchors = []
     for group in groups:
         inputs, mask, q, _buckets, norm = make_group_batch(group, args.score_normalization)
-        loss, _ntoks, policy_entropy, target_entropy = offline_tpo_loss(
-            model, inputs, mask, q, norm
+        ref_log_scores = cached_reference_scores(group)
+        loss, _ntoks, policy_entropy, target_entropy, _tpo_loss, kl_anchor = offline_tpo_loss(
+            model, inputs, mask, q, norm, ref_log_scores, args.kl_beta
         )
-        mx.eval(loss, policy_entropy, target_entropy)
+        mx.eval(loss, policy_entropy, target_entropy, kl_anchor)
         losses.append(float(loss.item()))
         policy_entropies.append(float(policy_entropy.item()))
         target_entropies.append(float(target_entropy.item()))
+        kl_anchors.append(float(kl_anchor.item()))
     model.train()
     return {
         "loss": sum(losses) / len(losses),
         "policy_entropy": sum(policy_entropies) / len(policy_entropies),
         "target_entropy": sum(target_entropies) / len(target_entropies),
+        "kl_anchor": sum(kl_anchors) / len(kl_anchors),
     }
 
 
@@ -244,6 +296,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--resume-adapter-file",
         default=None,
         help="Optional adapter weights to load after creating LoRA layers.",
+    )
+    parser.add_argument(
+        "--reference-adapter-path",
+        default=None,
+        help="Optional adapter directory used as the KL anchor distribution.",
+    )
+    parser.add_argument(
+        "--reference-from-initial-policy",
+        action="store_true",
+        help=(
+            "Use the initial policy as the KL reference. This is memory-friendly "
+            "when --resume-adapter-file is the same policy used for anchoring."
+        ),
+    )
+    parser.add_argument(
+        "--kl-beta",
+        type=float,
+        default=0.0,
+        help="Weight for KL(current group distribution || reference group distribution).",
     )
     parser.add_argument("--load-in-4bits", action="store_true")
     parser.add_argument("--num-layers", type=int, default=8)
@@ -309,6 +380,35 @@ def main() -> None:
         test_fraction=args.test_fraction,
     )
 
+    if args.kl_beta > 0.0:
+        if args.reference_from_initial_policy:
+            precompute_reference_scores(
+                model=model,
+                groups=groups,
+                args=args,
+                label="initial policy",
+            )
+        elif args.reference_adapter_path:
+            print(f"Loading KL reference adapter from {args.reference_adapter_path}")
+            ref_model, _ref_tokenizer, _ = from_pretrained(
+                model=args.model,
+                adapter_path=args.reference_adapter_path,
+                quantized_load=quantized_load,
+            )
+            precompute_reference_scores(
+                model=ref_model,
+                groups=groups,
+                args=args,
+                label=args.reference_adapter_path,
+            )
+            del ref_model
+            mx.clear_cache()
+        else:
+            raise ValueError(
+                "--kl-beta > 0 requires --reference-from-initial-policy "
+                "or --reference-adapter-path."
+            )
+
     print()
     print("Offline TPO dataset")
     print("=" * 48)
@@ -336,8 +436,22 @@ def main() -> None:
 
     def train_step(group: EncodedGroup, prev_grad, do_update: bool):
         inputs, mask, q, _buckets, norm = make_group_batch(group, args.score_normalization)
-        (loss, ntoks, policy_entropy, target_entropy), grad = loss_value_and_grad(
-            model, inputs, mask, q, norm
+        ref_log_scores = cached_reference_scores(group)
+        (
+            loss,
+            ntoks,
+            policy_entropy,
+            target_entropy,
+            tpo_loss,
+            kl_anchor,
+        ), grad = loss_value_and_grad(
+            model,
+            inputs,
+            mask,
+            q,
+            norm,
+            ref_log_scores,
+            args.kl_beta,
         )
         if prev_grad is not None:
             grad = tree_map(lambda x, y: x + y, grad, prev_grad)
@@ -346,7 +460,7 @@ def main() -> None:
                 grad = tree_map(lambda x: x / args.gradient_accumulation_steps, grad)
             optimizer.update(model, grad)
             grad = None
-        return loss, ntoks, policy_entropy, target_entropy, grad
+        return loss, ntoks, policy_entropy, target_entropy, tpo_loss, kl_anchor, grad
 
     model.train()
     grad_accum = None
@@ -361,10 +475,19 @@ def main() -> None:
             rng.shuffle(train_groups)
         group = train_groups[(iteration - 1) % len(train_groups)]
         do_update = iteration % args.gradient_accumulation_steps == 0
-        loss, ntoks, policy_entropy, target_entropy, grad_accum = train_step(
+        loss, ntoks, policy_entropy, target_entropy, tpo_loss, kl_anchor, grad_accum = train_step(
             group, grad_accum, do_update
         )
-        mx.eval(model.state, optimizer.state, loss, ntoks, policy_entropy, target_entropy)
+        mx.eval(
+            model.state,
+            optimizer.state,
+            loss,
+            ntoks,
+            policy_entropy,
+            target_entropy,
+            tpo_loss,
+            kl_anchor,
+        )
         losses.append(float(loss.item()))
         token_counts.append(float(ntoks.item()))
 
@@ -373,7 +496,8 @@ def main() -> None:
             print(
                 f"Iter {iteration}: val_loss={metrics['loss']:.3f}, "
                 f"val_policy_entropy={metrics['policy_entropy']:.3f}, "
-                f"val_target_entropy={metrics['target_entropy']:.3f}"
+                f"val_target_entropy={metrics['target_entropy']:.3f}, "
+                f"val_kl_anchor={metrics['kl_anchor']:.3f}"
             )
 
         if iteration % args.steps_per_report == 0 or iteration == args.iters:
@@ -382,6 +506,8 @@ def main() -> None:
             tokens = sum(token_counts)
             print(
                 f"Iter {iteration}: loss={mean_loss:.3f}, "
+                f"tpo_loss={float(tpo_loss.item()):.3f}, "
+                f"kl_anchor={float(kl_anchor.item()):.3f}, "
                 f"policy_entropy={float(policy_entropy.item()):.3f}, "
                 f"target_entropy={float(target_entropy.item()):.3f}, "
                 f"tok/s={tokens / elapsed:.1f}, peak_mem={mx.get_peak_memory() / 1e9:.3f}GB"
@@ -412,6 +538,7 @@ def main() -> None:
     print(f"train_loss_last: {mean_loss:.3f}")
     print(f"test_loss:       {test_metrics['loss']:.3f}")
     print(f"test_entropy:    {test_metrics['policy_entropy']:.3f}")
+    print(f"test_kl_anchor:  {test_metrics['kl_anchor']:.3f}")
     print(f"saved_adapter:   {adapter_file}")
 
 

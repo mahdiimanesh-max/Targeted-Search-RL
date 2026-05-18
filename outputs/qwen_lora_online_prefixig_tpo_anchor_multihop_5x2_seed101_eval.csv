@@ -1,0 +1,4 @@
+model,useful,redundant,no_search,distractor,other,correct,useful_red,num_cases,num_samples
+weighted-SFT,1.0,0.0,0.0,0.0,0.0,1.0,1.0,5,10
+A-TGPO proxy,0.8,0.0,0.0,0.2,0.0,0.8,0.8,5,10
+online PrefixIG-TPO+anchor,0.8038042538375689,0.0,0.0,0.19619574616243105,0.0,0.8038042538375689,0.8038042538375689,5,10

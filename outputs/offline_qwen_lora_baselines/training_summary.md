@@ -313,3 +313,53 @@ hurts multi-hop and noisy behavior. The next version should use a hybrid
 objective, for example `offline_TPO_loss + beta * SFT_loss` on high-target
 trajectories, or a KL/format regularizer, before making true offline TPO the
 paper headline.
+
+## Online PrefixIG-TPO + Token/Action Anchor Pilot
+
+We implemented `scripts/online_prefixig_tpo_lora.py` as the first online
+target-policy optimization pilot. The run warm-starts from
+`outputs/adapters/offline_prefixig_tpo_mixedhop_noisy_qwen_lora`, samples fresh
+rollouts from the current policy each online round, builds PrefixIG-TPO target
+weights over each sampled group, and applies a grouped TPO update with a small
+target-weighted token/action NLL anchor.
+
+Configuration:
+
+| setting | value |
+| --- | --- |
+| model | Qwen2.5-0.5B-Instruct |
+| quantization | 4-bit |
+| online iterations | 5 |
+| prompts per iteration | 2 |
+| samples per prompt | 3 |
+| update steps per iteration | 2 |
+| learning rate | `1e-5` |
+| anchor weight | `0.05` |
+| peak memory | about `7.5GB` |
+
+Held-out comparison, 5 examples x 2 samples, seed 101:
+
+| regime | model | correct | useful | redundant | distractor | useful-red |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| single-hop | PrefixIG-TPO weighted-SFT | 1.000 | 0.800 | 0.200 | 0.000 | +0.600 |
+| single-hop | A-TGPO proxy | 0.526 | 0.526 | 0.000 | 0.474 | +0.526 |
+| single-hop | online PrefixIG-TPO+anchor | 0.898 | 0.698 | 0.200 | 0.102 | +0.498 |
+| multi-hop | PrefixIG-TPO weighted-SFT | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+| multi-hop | A-TGPO proxy | 0.800 | 0.800 | 0.000 | 0.200 | +0.800 |
+| multi-hop | online PrefixIG-TPO+anchor | 0.804 | 0.804 | 0.000 | 0.196 | +0.804 |
+| noisy | PrefixIG-TPO weighted-SFT | 0.800 | 0.800 | 0.000 | 0.200 | +0.800 |
+| noisy | A-TGPO proxy | 0.800 | 0.800 | 0.000 | 0.200 | +0.800 |
+| noisy | online PrefixIG-TPO+anchor | 0.902 | 0.902 | 0.000 | 0.098 | +0.902 |
+
+Interpretation: online PrefixIG-TPO with an action anchor is much more stable
+than pure offline TPO and improves noisy retrieval. It is also the first
+non-SFT-main-objective version of our method that is competitive with A-TGPO
+proxy across all three regimes: it is much better on single-hop, slightly
+better on multi-hop, and better on noisy retrieval. This matters because the
+true-offline-TPO and KL-anchored offline-TPO variants were usually behind
+A-TGPO on multi-hop and noisy retrieval.
+
+The limitation is that this first online setting hurts the very strong
+weighted-SFT warm start on single-hop and multi-hop. The next tuning pass should
+reduce update strength or increase anchoring, then repeat this same three-regime
+comparison.
