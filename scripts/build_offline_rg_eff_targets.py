@@ -31,6 +31,8 @@ from mlx_generated_policy_diagnostics import (  # noqa: E402
     apply_efficiency_penalty,
     build_flexible_tool_loop_prompt,
     build_generation_prompt,
+    build_regime_case,
+    build_singlehop_flexible_tool_loop_prompt,
     build_tool_loop_prompt,
     classify_generated_sample,
     format_prompt,
@@ -195,6 +197,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["guided", "flexible"],
         default="flexible",
     )
+    parser.add_argument(
+        "--eval-regime",
+        choices=["multihop", "singlehop", "mixedhop", "noisy"],
+        default="multihop",
+        help=(
+            "Training data regime. mixedhop alternates single-hop and multi-hop "
+            "cases; noisy uses the noisy/distractor search index."
+        ),
+    )
     parser.add_argument("--lambda-ig", type=float, default=0.5)
     parser.add_argument("--tau", type=float, default=0.7)
     parser.add_argument("--curvature-eps", type=float, default=1e-3)
@@ -249,7 +260,28 @@ def compute_target_diags(method: str, generated_samples: list[Sample], scorer, a
             lambda_repeat_query=args.eff_lambda_repeat_query,
             lambda_low_ig=args.eff_lambda_low_ig,
         )
+    if method == "atgpo_proxy":
+        proxy_diags, _component_rows = atgpo_component_one_step_proxy(
+            diags=base_diags,
+            samples=generated_samples,
+            scorer=scorer,
+            step_scale=args.grpo_step_scale,
+            alpha=args.atgpo_alpha,
+            gamma=args.atgpo_gamma,
+            clip_low=args.atgpo_clip_low,
+            clip_high=args.atgpo_clip_high,
+            dynamic_clip=True,
+            sim_step=args.atgpo_sim_step,
+            token_logprob_scorer=scorer,
+        )
+        return proxy_diags
     raise ValueError(f"Unknown target method: {method}")
+
+
+def case_regime(eval_regime: str, case_idx: int) -> str:
+    if eval_regime == "mixedhop":
+        return "singlehop" if case_idx % 2 == 0 else "multihop"
+    return eval_regime
 
 
 def group_records_by_case(records: list[dict]) -> dict[int, list[dict]]:
@@ -461,15 +493,21 @@ def main() -> None:
     cases = [make_case(case_id, rng) for case_id in range(args.num_examples)]
 
     for case_idx, case in enumerate(cases):
-        search_index = unique_results([sample.completion for sample in case.samples])
+        active_regime = case_regime(args.eval_regime, case_idx)
+        user_case_prompt, search_index = build_regime_case(case, active_regime, rng)
         if args.one_shot:
-            user_prompt = build_generation_prompt(case.prompt, search_index)
+            user_prompt = build_generation_prompt(user_case_prompt, search_index)
         elif args.rollout_mode == "flexible":
-            user_prompt = build_flexible_tool_loop_prompt(
-                case.prompt, max_search_turns=args.max_search_turns
-            )
+            if active_regime == "singlehop":
+                user_prompt = build_singlehop_flexible_tool_loop_prompt(
+                    user_case_prompt, max_search_turns=args.max_search_turns
+                )
+            else:
+                user_prompt = build_flexible_tool_loop_prompt(
+                    user_case_prompt, max_search_turns=args.max_search_turns
+                )
         else:
-            user_prompt = build_tool_loop_prompt(case.prompt)
+            user_prompt = build_tool_loop_prompt(user_case_prompt)
 
         generation_prompt = format_prompt(
             scorer=scorer,
@@ -529,6 +567,7 @@ def main() -> None:
                 prediction = extract_answer(sample.completion) or extract_boxed(sample.completion) or ""
                 record = {
                     "target_method": method,
+                    "eval_regime": active_regime,
                     "case_id": case_idx,
                     "sample_id": sample.sample_id,
                     "prompt": user_prompt,
@@ -559,6 +598,7 @@ def main() -> None:
                         "source_sample_id": chosen["sample_id"],
                         "draw_id": draw_idx,
                         "target_method": method,
+                        "eval_regime": chosen.get("eval_regime", active_regime),
                         "bucket": chosen["bucket"],
                         "target_weight": chosen["target_weight"],
                         "answer": chosen["answer"],
