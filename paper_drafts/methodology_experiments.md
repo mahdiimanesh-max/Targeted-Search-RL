@@ -336,4 +336,18 @@ prefixig_tpo_mixedhop_noisy      0.800   0.000      0.200       0.800    +0.800
 atgpo_proxy_mixedhop_noisy       0.800   0.000      0.200       0.800    +0.800
 ```
 
+For the main method comparison, the same results can be summarized more compactly as:
+
+```text
+Evaluation regime          method                         correct  useful  redundant  distractor  useful-red
+single-hop                 PrefixIG-TPO mixedhop+noisy    1.000    0.800   0.200      0.000       +0.600
+single-hop                 A-TGPO proxy mixedhop+noisy    0.526    0.526   0.000      0.474       +0.526
+
+multi-hop                  PrefixIG-TPO mixedhop+noisy    1.000    1.000   0.000      0.000       +1.000
+multi-hop                  A-TGPO proxy mixedhop+noisy    0.800    0.800   0.000      0.200       +0.800
+
+corrected noisy/distractor PrefixIG-TPO mixedhop+noisy    0.800    0.800   0.000      0.200       +0.800
+corrected noisy/distractor A-TGPO proxy mixedhop+noisy    0.800    0.800   0.000      0.200       +0.800
+```
+
 This result changes the paper story in a good way. The earlier PrefixIG-TPO adapter was strong on multi-hop but brittle across regimes. The mixed-hop+noisy PrefixIG-TPO adapter is balanced: it preserves perfect correctness on single-hop and multi-hop while substantially improving noisy retrieval. It also avoids the reward-only failure mode where noisy correctness comes with redundant search. The A-TGPO proxy matches PrefixIG-TPO on the corrected noisy split, but is weaker on single-hop and multi-hop in this seed. Because this is still a 5-prompt-per-regime pilot, the right next step is multi-seed evaluation and a larger held-out set, not a stronger claim yet.

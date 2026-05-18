@@ -256,6 +256,17 @@ Corrected noisy/distractor:
 | prefixig_tpo_mixedhop_noisy LoRA | 0.800 | 0.000 | 0.200 | 0.800 | +0.800 |
 | atgpo_proxy_mixedhop_noisy LoRA | 0.800 | 0.000 | 0.200 | 0.800 | +0.800 |
 
+Focused comparison:
+
+| evaluation regime | method | correct | useful | redundant | distractor | useful-red |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| single-hop | PrefixIG-TPO mixedhop+noisy | 1.000 | 0.800 | 0.200 | 0.000 | +0.600 |
+| single-hop | A-TGPO proxy mixedhop+noisy | 0.526 | 0.526 | 0.000 | 0.474 | +0.526 |
+| multi-hop | PrefixIG-TPO mixedhop+noisy | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+| multi-hop | A-TGPO proxy mixedhop+noisy | 0.800 | 0.800 | 0.000 | 0.200 | +0.800 |
+| corrected noisy/distractor | PrefixIG-TPO mixedhop+noisy | 0.800 | 0.800 | 0.000 | 0.200 | +0.800 |
+| corrected noisy/distractor | A-TGPO proxy mixedhop+noisy | 0.800 | 0.800 | 0.000 | 0.200 | +0.800 |
+
 This is the strongest Qwen LoRA result so far. The PrefixIG-TPO mixed-hop+noisy
 adapter preserves perfect correctness on single-hop and multi-hop while sharply
 improving noisy retrieval behavior. Unlike reward-only training, it does not
