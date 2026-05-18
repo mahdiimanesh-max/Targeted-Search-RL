@@ -351,3 +351,24 @@ corrected noisy/distractor A-TGPO proxy mixedhop+noisy    0.800    0.800   0.000
 ```
 
 This result changes the paper story in a good way. The earlier PrefixIG-TPO adapter was strong on multi-hop but brittle across regimes. The mixed-hop+noisy PrefixIG-TPO adapter is balanced: it preserves perfect correctness on single-hop and multi-hop while substantially improving noisy retrieval. It also avoids the reward-only failure mode where noisy correctness comes with redundant search. The A-TGPO proxy matches PrefixIG-TPO on the corrected noisy split, but is weaker on single-hop and multi-hop in this seed. Because this is still a 5-prompt-per-regime pilot, the right next step is multi-seed evaluation and a larger held-out set, not a stronger claim yet.
+
+### Offline TPO Loss Pilot
+
+To test whether the target-policy construction can be trained directly rather than only distilled through weighted SFT, we implemented a true offline TPO trainer. For each case, the trainer loads all candidate trajectories, scores each completion under the current model, forms a softmax distribution over the group, and minimizes cross-entropy to the fixed PrefixIG-TPO target weights.
+
+The implementation is feasible on the 16GB Apple Silicon setting: Qwen2.5-0.5B 4-bit LoRA with 6 trajectories per group peaked around `10.05GB` memory. However, the first pure grouped-loss result is not yet competitive with weighted SFT:
+
+```text
+regime            model                          correct  useful  redundant  distractor  useful-red
+single-hop        PrefixIG-TPO weighted-SFT      1.000    0.800   0.200      0.000       +0.600
+single-hop        PrefixIG-TPO true-TPO scratch  0.485    0.485   0.000      0.283       +0.485
+single-hop        PrefixIG-TPO SFT-warm true-TPO 1.000    1.000   0.000      0.000       +1.000
+multi-hop         PrefixIG-TPO weighted-SFT      1.000    1.000   0.000      0.000       +1.000
+multi-hop         PrefixIG-TPO true-TPO scratch  0.190    0.190   0.000      0.703       +0.190
+multi-hop         PrefixIG-TPO SFT-warm true-TPO 0.333    0.333   0.000      0.667       +0.333
+corrected noisy   PrefixIG-TPO weighted-SFT      0.800    0.800   0.000      0.200       +0.800
+corrected noisy   PrefixIG-TPO true-TPO scratch  0.000    0.000   0.000      0.585       +0.000
+corrected noisy   PrefixIG-TPO SFT-warm true-TPO 0.419    0.337   0.082      0.581       +0.256
+```
+
+This should be treated as a useful negative pilot rather than a final result. The grouped TPO objective directly optimizes the distributional claim we want, but by itself it is under-constrained for generation quality and format preservation. The next implementation should use a hybrid objective: offline TPO over groups plus an SFT or KL anchor on high-target trajectories. That would test the paper's central hypothesis while preserving the behavioral benefits of the current weighted-SFT adapter.

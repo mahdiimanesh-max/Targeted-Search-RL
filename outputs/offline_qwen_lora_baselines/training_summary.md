@@ -275,3 +275,41 @@ matches the noisy score, but is weaker on single-hop and multi-hop in this seed.
 Because the experiment uses only 5 held-out prompts per regime, this is still a
 pilot result; the next step is to repeat it across more seeds and a larger
 held-out set.
+
+## True Offline TPO Pilot
+
+We implemented a standalone true offline TPO trainer in
+`scripts/train_offline_tpo_lora.py`. Unlike the earlier target-weighted SFT
+distillation, this trainer loads all candidate trajectories for a case, scores
+each completion under the current model, forms a softmax distribution over the
+group, and minimizes cross-entropy to the stored PrefixIG-TPO target weights.
+
+The trainer is feasible on the Mac setup with Qwen2.5-0.5B 4-bit LoRA. A full
+80-iteration scratch run peaked at about `10.05GB` memory and finished in a few
+minutes. It reached validation loss around `1.30` and test loss `1.238`. We also
+ran a 40-iteration low-learning-rate refinement initialized from the strong
+weighted-SFT adapter.
+
+Held-out comparison:
+
+| regime | model | correct | useful | redundant | distractor | useful-red |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| single-hop | PrefixIG-TPO weighted-SFT | 1.000 | 0.800 | 0.200 | 0.000 | +0.600 |
+| single-hop | PrefixIG-TPO true-TPO scratch | 0.485 | 0.485 | 0.000 | 0.283 | +0.485 |
+| single-hop | PrefixIG-TPO SFT-warm true-TPO | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+| multi-hop | PrefixIG-TPO weighted-SFT | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+| multi-hop | PrefixIG-TPO true-TPO scratch | 0.190 | 0.190 | 0.000 | 0.703 | +0.190 |
+| multi-hop | PrefixIG-TPO SFT-warm true-TPO | 0.333 | 0.333 | 0.000 | 0.667 | +0.333 |
+| corrected noisy | PrefixIG-TPO weighted-SFT | 0.800 | 0.800 | 0.000 | 0.200 | +0.800 |
+| corrected noisy | PrefixIG-TPO true-TPO scratch | 0.000 | 0.000 | 0.000 | 0.585 | +0.000 |
+| corrected noisy | PrefixIG-TPO SFT-warm true-TPO | 0.419 | 0.337 | 0.082 | 0.581 | +0.256 |
+
+Interpretation: true offline TPO is now implemented, but the first pure grouped
+loss is under-constrained for generation quality. It optimizes relative
+probability mass within candidate groups, but it does not directly preserve
+formatting and trajectory imitation the way SFT does. Warm-starting from the
+weighted-SFT adapter fixes single-hop and removes redundancy there, but still
+hurts multi-hop and noisy behavior. The next version should use a hybrid
+objective, for example `offline_TPO_loss + beta * SFT_loss` on high-target
+trajectories, or a KL/format regularizer, before making true offline TPO the
+paper headline.

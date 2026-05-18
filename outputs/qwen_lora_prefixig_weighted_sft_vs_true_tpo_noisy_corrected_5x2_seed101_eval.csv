@@ -1,0 +1,4 @@
+model,useful,redundant,no_search,distractor,other,correct,useful_red,num_cases,num_samples
+PrefixIG-TPO weighted-SFT,0.8,0.0,0.0,0.2,0.0,0.8,0.8,5,10
+PrefixIG-TPO true-TPO scratch,0.0,0.0,0.0,0.584850986521347,0.41514901347865285,0.0,0.0,5,10
+PrefixIG-TPO SFT-warm true-TPO,0.3373220175298727,0.08182076459068335,0.0,0.580857217879444,0.0,0.419142782120556,0.25550125293918935,5,10
