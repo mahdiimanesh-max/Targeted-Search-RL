@@ -424,3 +424,14 @@ anchor beta  regime      correct  useful  redundant  distractor  useful-red
 ```
 
 This sweep changes the interpretation of the online result: the earlier `beta=0.05` setting showed the method was viable and competitive with A-TGPO, while `beta=0.10` shows that the token/action anchor can recover the weighted-SFT adapter's clean-regime performance and improve noisy retrieval in the same run. The sample size is still small, so the next step is to repeat this setting with more held-out prompts and seeds.
+
+We repeated the `beta=0.10` setting in a separate run directory to verify that the result was not an artifact of a stale adapter. The repeated run reproduced the same held-out behavior:
+
+```text
+run                         regime      correct  useful  redundant  distractor  useful-red
+online PrefixIG-TPO beta=.10 single-hop 1.000    0.800   0.200      0.000       +0.600
+online PrefixIG-TPO beta=.10 multi-hop  1.000    1.000   0.000      0.000       +1.000
+online PrefixIG-TPO beta=.10 noisy      1.000    1.000   0.000      0.000       +1.000
+```
+
+For model comparison, we use the `OriginalPolicy` row from each generated-policy diagnostic table, because that row measures the trained adapter's actual sampled behavior. The additional rows in those diagnostics reweight the same generated samples under alternative target policies; when all sampled trajectories are already useful-correct, all diagnostic rows also become `1.000`.

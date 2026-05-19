@@ -1,0 +1,4 @@
+beta,regime,correct,useful,redundant,distractor,useful_red,num_cases,num_samples
+0.1,singlehop,1.0,0.8,0.2,0.0,0.6000000000000001,5,10
+0.1,multihop,1.0,1.0,0.0,0.0,1.0,5,10
+0.1,noisy,1.0,1.0,0.0,0.0,1.0,5,10

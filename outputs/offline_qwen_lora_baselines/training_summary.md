@@ -385,3 +385,18 @@ controls whether the online update preserves the action language and clean
 multi-hop behavior. The `beta=0.10` pilot is the strongest online result so far,
 but it should be repeated with more held-out prompts and seeds before being used
 as a final headline.
+
+We repeated the `beta=0.10` run in a fresh output directory and reproduced the
+same held-out result:
+
+| run | regime | correct | useful | redundant | distractor | useful-red |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| beta=0.10 repeat | single-hop | 1.000 | 0.800 | 0.200 | 0.000 | +0.600 |
+| beta=0.10 repeat | multi-hop | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+| beta=0.10 repeat | noisy | 1.000 | 1.000 | 0.000 | 0.000 | +1.000 |
+
+In these generated-policy diagnostic tables, `OriginalPolicy` is the trained
+model's actual sampled behavior. The other rows are alternative reweightings of
+the same generated samples. Therefore, when all generated samples are already
+useful-correct, all rows become perfect; the model result should be read from
+`OriginalPolicy`.
