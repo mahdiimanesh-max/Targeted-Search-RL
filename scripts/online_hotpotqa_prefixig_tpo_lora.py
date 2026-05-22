@@ -64,6 +64,7 @@ from prefix_ig_tpo_smoke import (  # noqa: E402
     softmax,
     token_f1,
 )
+from prefix_ig_tpo_synthetic import atgpo_component_one_step_proxy  # noqa: E402
 from train_offline_tpo_lora import (  # noqa: E402
     encode_group_records,
     make_group_batch,
@@ -202,7 +203,23 @@ def compute_hotpot_diags(
             for sample, utility in zip(samples, utilities)
         ]
     )
-    return [replace(diag, target_weight=weight) for diag, weight in zip(diags, weights)]
+    diags = [replace(diag, target_weight=weight) for diag, weight in zip(diags, weights)]
+
+    if method == "atgpo_proxy":
+        diags, _component_rows = atgpo_component_one_step_proxy(
+            diags=diags,
+            samples=samples,
+            scorer=scorer,
+            step_scale=args.grpo_step_scale,
+            alpha=args.atgpo_alpha,
+            gamma=args.atgpo_gamma,
+            clip_low=args.atgpo_clip_low,
+            clip_high=args.atgpo_clip_high,
+            dynamic_clip=True,
+            sim_step=args.atgpo_sim_step,
+            token_logprob_scorer=scorer,
+        )
+    return diags
 
 
 def sample_hotpot_groups(
@@ -378,6 +395,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "prefixig_tpo_curv",
             "prefixig_tpo_rg_eff",
             "prefixig_tpo_curv_rg_eff",
+            "atgpo_proxy",
         ],
         default="prefixig_tpo_rg_eff",
     )
@@ -397,6 +415,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda-ig", type=float, default=0.5)
     parser.add_argument("--tau", type=float, default=0.7)
     parser.add_argument("--curvature-eps", type=float, default=1e-3)
+    parser.add_argument("--grpo-step-scale", type=float, default=1.0)
+    parser.add_argument("--atgpo-alpha", type=float, default=0.3)
+    parser.add_argument("--atgpo-gamma", type=float, default=1.0)
+    parser.add_argument("--atgpo-clip-low", type=float, default=3e-3)
+    parser.add_argument("--atgpo-clip-high", type=float, default=4e-3)
+    parser.add_argument("--atgpo-sim-step", type=float, default=0.05)
     parser.add_argument("--eff-optimal-turns", type=int, default=2)
     parser.add_argument("--eff-repeat-threshold", type=float, default=0.55)
     parser.add_argument("--eff-min-turn-ig", type=float, default=0.05)
