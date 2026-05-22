@@ -1,0 +1,4 @@
+condition,model,num_examples,samples_per_example,seed,useful,redundant,no_search,distractor,other,correct,useful_red,exact_match,token_f1,support_coverage
+base_sdar,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.188,0.062,0.000,0.562,0.188,0.250,+0.125,0.000,0.155,0.531
+prefixig_tpo_sdar,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.375,0.125,0.000,0.500,0.000,0.500,+0.250,0.188,0.357,0.750
+atgpo_proxy_sdar,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.250,0.125,0.000,0.500,0.125,0.375,+0.125,0.250,0.344,0.531

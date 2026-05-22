@@ -25,3 +25,5 @@ outputs/hotpotqa_mini/
 outputs/hotpotqa_mini_smoke/
 outputs/eval_hotpotqa_mini*.jsonl
 outputs/hotpot_online*.jsonl
+outputs/eval_hotpot_sdar_*.jsonl
+outputs/hotpot_sdar_*_online_rollouts.jsonl

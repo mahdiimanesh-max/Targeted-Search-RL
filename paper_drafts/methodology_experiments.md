@@ -455,4 +455,18 @@ SDAR search skills 0.438    0.312   0.062      0.062      0.500       0.062  +0.
 
 The SDAR skill prior improves correctness by `+0.313`, useful-correct behavior by `+0.250`, and support coverage by `+0.125` absolute. This is the first positive real-world HotpotQA-mini result in the project. It suggests that the bottleneck was not simply model scale: Qwen2.5-1.5B without skills remained weak, while the same model with an explicit search-strategy prior produced more useful trajectories and fewer distractor failures.
 
-This result also clarifies how SDAR-style skill conditioning can complement PrefixIG-TPO. PrefixIG-TPO can only reweight or train on trajectories that exist in the candidate pool. In the earlier Hotpot runs, the candidate pool had too few useful-correct trajectories. SDAR search skills improve the candidate pool by making the base policy search more deliberately. The next paper-grade experiment should therefore combine the two: use SDAR-skill prompting to generate a stronger HotpotQA-mini candidate pool, then train or reweight with PrefixIG-TPO and compare against skill prompting alone.
+This result also clarifies how SDAR-style skill conditioning can complement PrefixIG-TPO. PrefixIG-TPO can only reweight or train on trajectories that exist in the candidate pool. In the earlier Hotpot runs, the candidate pool had too few useful-correct trajectories. SDAR search skills improve the candidate pool by making the base policy search more deliberately.
+
+We then ran the direct method comparison under the same SDAR skill prior. The base condition is Qwen2.5-1.5B with SDAR skills at inference time only. The two trained conditions use the same SDAR skill prompts during online rollout generation and evaluation, then update separate LoRA adapters with either PrefixIG-TPO or the A-TGPO proxy target. The run used 5 online iterations, 1 prompt per iteration, 2 samples per prompt, 1 update per iteration, learning rate `5e-6`, anchor weight `0.10`, and the same 8-example, 2-sample held-out evaluation.
+
+```text
+HotpotQA-mini + SDAR skills, Qwen2.5-1.5B-Instruct 4-bit, 8 examples x 2 samples, seed 101
+condition             correct  useful  redundant  no_search  distractor  other  useful-red  exact  token_f1  support_cov
+Base + SDAR           0.250    0.188   0.062      0.000      0.562       0.188  +0.125      0.000  0.155     0.531
+PrefixIG-TPO + SDAR   0.500    0.375   0.125      0.000      0.500       0.000  +0.250      0.188  0.357     0.750
+A-TGPO proxy + SDAR   0.375    0.250   0.125      0.000      0.500       0.125  +0.125      0.250  0.344     0.531
+```
+
+This is a good pilot signal for the method. With the same SDAR search prior, PrefixIG-TPO improves correctness over prompt-only inference from `0.250` to `0.500`, doubles useful-correct behavior from `0.188` to `0.375`, and raises support coverage from `0.531` to `0.750`. It also outperforms the A-TGPO proxy on the main retrieval-process metrics: correctness, useful evidence use, useful-minus-redundant, token F1, and support coverage. The A-TGPO proxy has slightly higher exact match in this small run, so the result should be described as a process-quality win rather than a final QA win.
+
+The main limitation is scale. The comparison has only 16 held-out samples and the online training groups are tiny, so we should not present it as a definitive real-world benchmark. Its value is that it closes the loop missing from the previous SDAR-only result: SDAR improves the candidate pool, and PrefixIG-TPO can then learn from that improved pool better than the A-TGPO proxy on the same Mac-feasible setup. Peak memory was high, around `19GB` for PrefixIG-TPO and `17GB` for A-TGPO proxy, so larger runs need careful batching or a smaller update schedule.
