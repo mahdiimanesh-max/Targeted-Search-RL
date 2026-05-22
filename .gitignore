@@ -18,3 +18,10 @@ __pycache__/
 # Generated model checkpoints/adapters
 outputs/adapters/
 *.safetensors
+
+# Local HotpotQA-mini data, logs, and raw generated samples
+outputs/logs/
+outputs/hotpotqa_mini/
+outputs/hotpotqa_mini_smoke/
+outputs/eval_hotpotqa_mini*.jsonl
+outputs/hotpot_online*.jsonl

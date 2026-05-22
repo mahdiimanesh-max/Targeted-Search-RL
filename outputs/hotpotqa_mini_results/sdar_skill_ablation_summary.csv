@@ -1,0 +1,3 @@
+condition,model,num_examples,samples_per_example,seed,useful,redundant,no_search,distractor,other,correct,useful_red,exact_match,token_f1,support_coverage
+no_skills,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.062,0.062,0.000,0.812,0.062,0.125,+0.000,0.000,0.051,0.531
+sdar_search_skills,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.312,0.062,0.062,0.500,0.062,0.438,+0.250,0.188,0.279,0.656

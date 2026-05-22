@@ -435,3 +435,24 @@ online PrefixIG-TPO beta=.10 noisy      1.000    1.000   0.000      0.000       
 ```
 
 For model comparison, we use the `OriginalPolicy` row from each generated-policy diagnostic table, because that row measures the trained adapter's actual sampled behavior. The additional rows in those diagnostics reweight the same generated samples under alternative target policies; when all sampled trajectories are already useful-correct, all diagnostic rows also become `1.000`.
+
+### Real-World HotpotQA-Mini and SDAR Search Skills
+
+We next moved beyond the synthetic search environment to a real retrieval-QA pilot using HotpotQA. We built `HotpotQA-mini` from the `hotpot_qa/distractor` split: 80 training questions, 40 evaluation questions, and a local corpus of 951 deduplicated passages. Each example preserves the question, short gold answer, supporting document titles, support passages, and distractor passages. The evaluator uses a local BM25-style retriever over this corpus and lets the model interact through `<search>`, `<result>`, and `<answer>` actions. This experiment is intentionally small enough for the Mac setup, but it tests a harder real-world failure mode: the model must write useful search queries, retrieve evidence, and synthesize a short answer.
+
+The first unrestricted HotpotQA-mini runs showed that controlled synthetic success did not transfer automatically. Qwen2.5-0.5B often retrieved useful evidence but failed to synthesize the correct short answer or repeated broad searches. Hotpot-specific online PrefixIG-TPO training with gold support anchors also underperformed: it over-shifted the model toward short title/entity searches and reduced support coverage on held-out questions. We therefore treat these runs as a negative transfer pilot rather than as a method result. The main diagnosis is that real HotpotQA introduces query-planning and answer-synthesis errors that are mostly absent from the controlled oracle-search environment.
+
+To test this diagnosis, we adapted a lightweight idea from the SDAR repository: skill-conditioned search prompting. We did not run SDAR's full CUDA/vLLM/Ray training stack. Instead, we injected SDAR's search skill files as a prompt-side search prior: general search skills, multi-hop reasoning skills, and comparison skills. This gives the policy explicit guidance such as decomposing multi-hop questions, issuing targeted sequential searches, collecting comparable attributes before answering, and stopping once evidence is sufficient. The evaluator supports this through `--skill-prompt-file`, which makes the comparison Mac-feasible and isolates the effect of the search-skill prior.
+
+The key real-world result is positive:
+
+```text
+HotpotQA-mini, Qwen2.5-1.5B-Instruct 4-bit, 8 examples x 2 samples, seed 101
+condition          correct  useful  redundant  no_search  distractor  other  useful-red  exact  token_f1  support_cov
+no skills          0.125    0.062   0.062      0.000      0.812       0.062  +0.000      0.000  0.051     0.531
+SDAR search skills 0.438    0.312   0.062      0.062      0.500       0.062  +0.250      0.188  0.279     0.656
+```
+
+The SDAR skill prior improves correctness by `+0.313`, useful-correct behavior by `+0.250`, and support coverage by `+0.125` absolute. This is the first positive real-world HotpotQA-mini result in the project. It suggests that the bottleneck was not simply model scale: Qwen2.5-1.5B without skills remained weak, while the same model with an explicit search-strategy prior produced more useful trajectories and fewer distractor failures.
+
+This result also clarifies how SDAR-style skill conditioning can complement PrefixIG-TPO. PrefixIG-TPO can only reweight or train on trajectories that exist in the candidate pool. In the earlier Hotpot runs, the candidate pool had too few useful-correct trajectories. SDAR search skills improve the candidate pool by making the base policy search more deliberately. The next paper-grade experiment should therefore combine the two: use SDAR-skill prompting to generate a stronger HotpotQA-mini candidate pool, then train or reweight with PrefixIG-TPO and compare against skill prompting alone.
