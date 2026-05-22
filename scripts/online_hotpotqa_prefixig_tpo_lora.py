@@ -222,7 +222,11 @@ def sample_hotpot_groups(
     model.eval()
     for local_idx, record in enumerate(selected_records):
         case_id = (iter_idx - 1) * args.prompts_per_iter + local_idx
-        user_prompt = build_prompt(record, max_search_turns=args.max_search_turns)
+        user_prompt = build_prompt(
+            record,
+            max_search_turns=args.max_search_turns,
+            skill_text=args.skill_text,
+        )
         generation_prompt = format_prompt(
             scorer=scorer,
             user_prompt=user_prompt,
@@ -340,6 +344,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--load-in-4bits", action="store_true")
     parser.add_argument("--train-jsonl", default="outputs/hotpotqa_mini/train.jsonl")
     parser.add_argument("--corpus-jsonl", default="outputs/hotpotqa_mini/corpus.jsonl")
+    parser.add_argument(
+        "--skill-prompt-file",
+        action="append",
+        default=[],
+        help=(
+            "Optional SDAR-style skill markdown file to inject into training prompts. "
+            "Can be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--skill-max-chars",
+        type=int,
+        default=1800,
+        help="Maximum characters of concatenated skill text to inject.",
+    )
     parser.add_argument("--num-layers", type=int, default=8)
     parser.add_argument("--rank", type=int, default=8)
     parser.add_argument("--scale", type=float, default=20.0)
@@ -406,6 +425,15 @@ def main() -> None:
     train_records = read_jsonl(Path(args.train_jsonl))
     corpus = read_jsonl(Path(args.corpus_jsonl))
     retriever = MiniBM25(corpus)
+    skill_text = ""
+    if args.skill_prompt_file:
+        chunks = []
+        for path in args.skill_prompt_file:
+            chunks.append(Path(path).read_text(encoding="utf-8").strip())
+        skill_text = "\n\n".join(chunks)
+        if args.skill_max_chars > 0 and len(skill_text) > args.skill_max_chars:
+            skill_text = skill_text[: args.skill_max_chars].rsplit("\n", 1)[0].strip()
+    args.skill_text = skill_text
 
     lora_config = {
         "rank": args.rank,
@@ -450,6 +478,7 @@ def main() -> None:
     print(f"use_f1_reward: {args.use_f1_reward}")
     print(f"gold_anchor_count: {args.gold_anchor_count}")
     print(f"anchor_beta: {args.anchor_beta}")
+    print(f"skill_prompt_files: {len(args.skill_prompt_file)}")
     print(
         f"schedule: {args.online_iters} iters x {args.prompts_per_iter} prompts "
         f"x {args.samples_per_prompt} samples, {args.updates_per_iter} updates/iter"
