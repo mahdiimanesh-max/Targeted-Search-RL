@@ -434,4 +434,14 @@ We then ran the direct comparison that tests our method rather than only the SDA
 
 Interpretation: this is a positive pilot for PrefixIG-TPO. With the same SDAR search prior, PrefixIG-TPO doubles correctness and useful-correct behavior over the prompt-only base condition and improves support coverage from `0.531` to `0.750`. It also beats the A-TGPO proxy on correctness, useful evidence use, useful-minus-redundant, token F1, and support coverage. A-TGPO has slightly higher exact match in this 16-sample run, so the result should be framed as a process-quality gain and a promising real-world pilot, not a final large-scale QA benchmark.
 
+We then ran a seed-202 scale-up: 12 held-out examples, 2 samples per example, and 8 online iterations per trained adapter.
+
+| condition | correct | useful | redundant | no_search | distractor | other | useful-red | exact | token_f1 | support_cov |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base + SDAR | 0.208 | 0.000 | 0.208 | 0.000 | 0.750 | 0.042 | -0.208 | 0.208 | 0.238 | 0.438 |
+| PrefixIG-TPO + SDAR | 0.208 | 0.167 | 0.042 | 0.000 | 0.750 | 0.042 | +0.125 | 0.167 | 0.223 | 0.500 |
+| A-TGPO proxy + SDAR | 0.000 | 0.000 | 0.000 | 0.000 | 0.958 | 0.042 | +0.000 | 0.000 | 0.021 | 0.438 |
+
+Interpretation: the larger seed-202 run is mixed. PrefixIG-TPO does not improve correctness over Base+SDAR, but it does shift the correct behavior from redundant evidence to useful evidence and improves support coverage. A-TGPO proxy is unstable on this seed and collapses to mostly distractor-wrong behavior. The combined seed-101/seed-202 story should therefore be cautious: PrefixIG-TPO shows a promising and more stable evidence-process improvement under the same SDAR prior, but robust QA accuracy gains need more seeds/data.
+
 The tracked aggregate is `outputs/hotpotqa_mini_results/sdar_method_comparison_summary.csv`. Raw JSONLs and logs are local generated artifacts.

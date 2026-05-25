@@ -470,3 +470,17 @@ A-TGPO proxy + SDAR   0.375    0.250   0.125      0.000      0.500       0.125  
 This is a good pilot signal for the method. With the same SDAR search prior, PrefixIG-TPO improves correctness over prompt-only inference from `0.250` to `0.500`, doubles useful-correct behavior from `0.188` to `0.375`, and raises support coverage from `0.531` to `0.750`. It also outperforms the A-TGPO proxy on the main retrieval-process metrics: correctness, useful evidence use, useful-minus-redundant, token F1, and support coverage. The A-TGPO proxy has slightly higher exact match in this small run, so the result should be described as a process-quality win rather than a final QA win.
 
 The main limitation is scale. The comparison has only 16 held-out samples and the online training groups are tiny, so we should not present it as a definitive real-world benchmark. Its value is that it closes the loop missing from the previous SDAR-only result: SDAR improves the candidate pool, and PrefixIG-TPO can then learn from that improved pool better than the A-TGPO proxy on the same Mac-feasible setup. Peak memory was high, around `19GB` for PrefixIG-TPO and `17GB` for A-TGPO proxy, so larger runs need careful batching or a smaller update schedule.
+
+We then ran a small scale-up/replication with a different seed: 12 held-out examples, 2 samples per example, seed 202, and 8 online iterations for each trained adapter. This is still a pilot, but it tests whether the seed-101 result survives a larger held-out sample and a different training/evaluation seed.
+
+```text
+HotpotQA-mini + SDAR skills, Qwen2.5-1.5B-Instruct 4-bit, 12 examples x 2 samples, seed 202
+condition             correct  useful  redundant  no_search  distractor  other  useful-red  exact  token_f1  support_cov
+Base + SDAR           0.208    0.000   0.208      0.000      0.750       0.042  -0.208      0.208  0.238     0.438
+PrefixIG-TPO + SDAR   0.208    0.167   0.042      0.000      0.750       0.042  +0.125      0.167  0.223     0.500
+A-TGPO proxy + SDAR   0.000    0.000   0.000      0.000      0.958       0.042  +0.000      0.000  0.021     0.438
+```
+
+The replication is mixed. PrefixIG-TPO does not improve answer correctness over the SDAR prompt-only baseline on seed 202: both are `0.208`. However, it substantially changes the type of correct behavior. The base SDAR policy's correct answers are entirely redundant-correct (`0.208` redundant, `0.000` useful), whereas PrefixIG-TPO shifts most correct mass toward useful evidence (`0.167` useful, `0.042` redundant), improving useful-minus-redundant from `-0.208` to `+0.125` and support coverage from `0.438` to `0.500`. The A-TGPO proxy is unstable in this run, collapsing to mostly distractor-wrong trajectories.
+
+Taken together, the HotpotQA-mini results support a narrower but still useful claim. The seed-101 run showed gains in both correctness and process quality; the seed-202 scale-up does not replicate the correctness gain, but it does replicate the process-quality direction and shows better stability than the A-TGPO proxy. Therefore, the current real-world claim should be framed as a promising pilot: PrefixIG-TPO can improve evidence-use behavior over the same SDAR candidate prior, but larger seeds/data are needed before claiming robust QA accuracy improvements.

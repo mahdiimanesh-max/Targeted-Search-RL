@@ -2,3 +2,6 @@ condition,model,num_examples,samples_per_example,seed,useful,redundant,no_search
 base_sdar,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.188,0.062,0.000,0.562,0.188,0.250,+0.125,0.000,0.155,0.531
 prefixig_tpo_sdar,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.375,0.125,0.000,0.500,0.000,0.500,+0.250,0.188,0.357,0.750
 atgpo_proxy_sdar,Qwen2.5-1.5B-Instruct-4bit,8,2,101,0.250,0.125,0.000,0.500,0.125,0.375,+0.125,0.250,0.344,0.531
+base_sdar,Qwen2.5-1.5B-Instruct-4bit,12,2,202,0.000,0.208,0.000,0.750,0.042,0.208,-0.208,0.208,0.238,0.438
+prefixig_tpo_sdar,Qwen2.5-1.5B-Instruct-4bit,12,2,202,0.167,0.042,0.000,0.750,0.042,0.208,+0.125,0.167,0.223,0.500
+atgpo_proxy_sdar,Qwen2.5-1.5B-Instruct-4bit,12,2,202,0.000,0.000,0.000,0.958,0.042,0.000,+0.000,0.000,0.021,0.438
