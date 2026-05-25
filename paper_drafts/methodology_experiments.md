@@ -1,132 +1,89 @@
 # Methodology and Experiments Draft
 
-## Methodology
+## Paper Thesis
 
-We study reinforcement learning for multi-turn retrieval-augmented reasoning, where a model must decide not only the final answer but also which intermediate search actions are useful. In this setting, final-answer reward is often too sparse. A trajectory that uses two necessary evidence searches and a trajectory that performs several redundant searches may both receive the same terminal correctness reward, even though the first trajectory is more efficient and better aligned with the intended reasoning process. This creates a credit-assignment problem: the optimizer can learn to produce correct answers without learning which search actions actually improved the answer.
+We study reinforcement learning for retrieval-augmented reasoning systems that must decide both **what answer to give** and **which intermediate search actions are worth taking**. Final-answer reward alone is too coarse for this setting. A trajectory that uses exactly the necessary evidence and a trajectory that performs redundant or distracting searches can receive the same terminal reward, even though their reasoning processes differ substantially.
 
-Our method starts from the information-gain view used in A-TGPO-style multi-turn reasoning. For a prompt `x`, a generated trajectory `y_i` contains a sequence of search/result turns followed by an answer. Let the ground-truth answer be `a*`. For each search turn `t`, we estimate the incremental value of the newly retrieved evidence by measuring the change in answer log-likelihood:
+Our central claim is:
 
 ```text
-IG_{i,t} = log p(a* | x, prefix up to turn t)
+Prefix-level information gain can be used to construct target policies that move probability mass toward useful evidence-seeking trajectories, not merely correct final answers.
+```
+
+The paper should be framed as a method and mechanism paper, with small-model real-world pilots. The strongest evidence is that PrefixIG-TPO consistently improves **evidence-use behavior**; answer-accuracy gains are promising but not yet robust enough to oversell.
+
+## Method
+
+### Prefix Information Gain
+
+For a prompt `x`, generated trajectory `y_i`, and ground-truth answer `a*`, each search/result turn can be scored by how much it changes the model's likelihood of the correct answer:
+
+```text
+IG_{i,t} = log p(a* | x, prefix through turn t)
          - log p(a* | x, prefix before turn t).
 ```
 
-Positive information gain means that the retrieved evidence made the correct answer more likely under the model. Low or negative gain indicates that the turn was redundant, distracting, or harmful. We aggregate turn-level gains into a trajectory-level evidence score. In the current implementation, we use a normalized aggregate PrefixIG score so that it can be combined with terminal reward across groups:
+Positive information gain means the newly retrieved evidence made the correct answer more likely. Low or negative gain suggests redundant, distracting, or unhelpful evidence. We aggregate turn-level gains into a trajectory-level PrefixIG score and combine it with terminal reward:
 
 ```text
 U_i = R_i + lambda_ig * z(IG_i),
 ```
 
-where `R_i` is the final-answer reward and `z(IG_i)` is the group-normalized prefix information gain. This signal is computed only during training or offline target construction; inference cost is unchanged.
+where `R_i` is final-answer reward and `z(IG_i)` is a group-normalized PrefixIG score.
 
-The key methodological choice is to use PrefixIG to construct a target distribution rather than only as a scalar policy-gradient advantage. In a GRPO/PPO-style update, a scalar advantage increases or decreases the probability of each sampled trajectory independently. This can help, but it does not explicitly redistribute probability mass among competing trajectories for the same prompt. Target Policy Optimization (TPO) gives us a more direct mechanism. For each prompt, we sample a group of `K` trajectories and define a target distribution over the group:
+### PrefixIG-TPO
+
+Instead of using PrefixIG only as a scalar advantage, we use it to construct a target distribution over candidate trajectories for the same prompt. For each prompt, we sample a group of `K` trajectories and define:
 
 ```text
 q_i proportional to stopgrad(pi_old(y_i | x)) * exp(U_i / tau).
 ```
 
-The old-policy probability keeps the target close to the sampled policy support, while the exponentiated utility shifts mass toward trajectories that are correct and have useful evidence. The model is then trained to match this target distribution over the sampled completions. In sequence form, if `s_i` is the current model sequence log-score for completion `y_i`, the group probability is
+The old-policy factor keeps the target near the sampled policy support, while the exponentiated utility shifts probability mass toward trajectories that are both correct and evidence-useful. If `s_i` is the current model sequence log-score for completion `y_i`, then
 
 ```text
-p_i = softmax_i(s_i),
-```
-
-and the TPO loss is the cross-entropy from the target distribution to the current grouped policy:
-
-```text
+p_i = softmax_i(s_i)
 L_TPO = - sum_i q_i log p_i.
 ```
 
-This differs from simply adding PrefixIG as reward shaping. The target distribution makes the comparison within each prompt explicit: a useful correct search trajectory can receive more target mass than a redundant correct trajectory, even when both have the same final answer reward.
+This makes the within-prompt comparison explicit: a useful correct trajectory can receive more target mass than a redundant correct trajectory even when both have the same terminal answer reward.
 
-During early generated-policy experiments, we found that PrefixIG alone can still overvalue redundant correct trajectories. A redundant trajectory can accumulate positive evidence gain if it repeats or rephrases helpful evidence, even though it uses more search turns than necessary. To address this, we add a reward-gated efficiency penalty. Let `C_i` denote a redundancy cost based on extra turns beyond the optimal number, repeated queries/results, and low-information-gain turns. We define:
+### Online Anchor Variant
 
-```text
-U_i = R_i
-    + lambda_ig * z(IG_i)
-    - R_i * lambda_eff * C_i.
-```
-
-The reward gate is important. Without it, a short but wrong trajectory could be rewarded for being efficient. By multiplying the efficiency penalty by `R_i`, we penalize waste primarily among correct trajectories. This encourages the model to prefer trajectories that are both correct and evidence-efficient.
-
-We also implemented a curvature-aware diagnostic variant. The goal is not to make curvature the main contribution, but to test whether cheap second-order proxies can stabilize or sharpen target construction. For a grouped softmax over completions, a simple local curvature proxy is:
+The most successful trainable variant uses online rollout refresh plus a token/action anchor:
 
 ```text
-curv_i = p_i * (1 - p_i).
+loss = grouped PrefixIG-TPO loss + beta * weighted token/action NLL.
 ```
 
-We use this as a trust or scaling signal in diagnostic target construction:
+The grouped TPO term adapts the policy toward the PrefixIG target distribution. The token/action anchor prevents the model from drifting away from the search/action language while training on very small online batches.
 
-```text
-U_i_curv = U_i / sqrt(curv_i + eps).
-```
+### Baselines
 
-This is not a full Hessian. It is a lightweight group-curvature approximation that is feasible on a laptop and can later be replaced by richer Hessian or variance-based trust measures.
-
-Our experimental methodology therefore separates three ideas that are often conflated:
-
-1. Evidence credit: PrefixIG estimates which search turns improved the answer likelihood.
-2. Target construction: TPO converts evidence-aware utilities into a group distribution.
-3. Efficiency control: reward-gated redundancy penalties distinguish useful search from unnecessary search.
-
-We compare these components against final-reward-only TPO, PrefixIG-GRPO/A-TGPO-style scalar advantage updates, A-TGPO component accounting with token-level log probabilities and clipping, PrefixIG-TPO, and PrefixIG-TPO with reward-gated efficiency.
-
-## Experiments
-
-We designed the experiments as a ladder, from deterministic diagnostics to trainable model updates. This was necessary because the original A-TGPO codebase is built around CUDA, veRL, vLLM, and Ray, while our development machine is an Apple Silicon laptop. The repo therefore uses the original A-TGPO implementation as a conceptual reference for turn segmentation, token-level log-probability accounting, clipping, and KL/trust-region structure, while using MLX and `mlx-lm-lora` for Mac-feasible experiments.
-
-### Synthetic Target-Construction Diagnostics
-
-The first experiment uses controlled synthetic multi-hop QA cases. Each prompt has candidate trajectories corresponding to useful correct search, redundant correct search, no-search correct answering, and distractor/wrong search. Because the candidates are controlled, this experiment isolates whether the target construction assigns probability mass to the intended trajectory type.
-
-The main metric is `useful-red`, defined as target mass on useful correct trajectories minus target mass on redundant correct trajectories. Positive values mean the method prefers concise useful evidence over redundant evidence. In the early synthetic comparison, final-reward-only TPO barely separated useful from redundant correct trajectories, while PrefixIG-based methods created a much larger gap:
-
-```text
-method                useful-red
-OriginalPolicy        +0.002
-FinalReward-TPO       +0.004
-PrefixIG-GRPO         +0.093
-A-TGPO-components     +0.108
-PrefixIG-TPO          +0.112
-PrefixIG-TPO+curv     +0.288
-```
-
-This diagnostic supports the central claim that final reward alone cannot distinguish useful and redundant correct trajectories. PrefixIG helps, and using it inside the TPO target distribution is more direct than using it only as scalar advantage shaping.
-
-### Real MLX Policy Scoring and Generated Rollouts
-
-We next moved from hand-written candidates to trajectories generated and scored by a real MLX language model. We used Qwen2.5-0.5B-Instruct through MLX to generate search trajectories under an oracle-search loop: the model emits `<search>` actions, a lexical search function returns `<result>` facts, and the model eventually emits `<answer>`. We then score completions with the model's own log probabilities and compute PrefixIG from answer likelihood changes across prefixes.
-
-This setting exposed an important failure mode. Flexible generation sometimes produced correct but redundant search behavior. Raw PrefixIG can assign nontrivial value to these trajectories because repeated useful evidence can still increase answer likelihood. In generated-policy diagnostics, reward-only methods improved correctness but did not reliably prefer efficient search. PrefixIG-GRPO and PrefixIG-TPO improved the useful-vs-redundant gap, while reward-gated efficiency further reduced redundant target mass.
-
-A representative generated-policy comparison showed the following useful-vs-redundant target-mass gaps:
-
-```text
-method                   useful-red
-OriginalPolicy           -0.015
-FinalReward-TPO          -0.014
-PrefixIG-GRPO            +0.133
-A-TGPO-components        -0.008
-PrefixIG-TPO             +0.166
-PrefixIG-TPO+rg_eff      +0.273
-PrefixIG-TPO+curv        +0.337
-PrefixIG-TPO+curv+rg_eff +0.406
-```
-
-These are target-construction diagnostics, not yet model-training results. Their purpose is to validate that the offline objective points the update in the desired direction before spending memory and time on LoRA fine-tuning.
-
-### Trainable Toy RLVR
-
-The next experiment tests whether the target-construction advantage survives actual training. We implemented a small MLX transformer RLVR task where the model chooses discrete search/action tokens and then emits an answer token. The task is deliberately small enough to run with multiple seeds on a laptop, while preserving the core ambiguity of the real problem: a final answer can be correct with useful search, redundant search, or poor evidence behavior.
-
-We compare four training objectives:
+The main comparisons should be:
 
 - `reward_tpo`: final-reward-only target policy optimization.
-- `prefixig_atgpo`: an A-TGPO-style scalar PrefixIG advantage path with clipping/trust accounting.
-- `prefixig_tpo`: PrefixIG utility used to construct TPO targets.
-- `prefixig_tpo_rg_eff`: PrefixIG-TPO with reward-gated efficiency.
+- `A-TGPO proxy`: our Mac-feasible proxy for A-TGPO-style turn/token credit, clipping, and trust accounting. This should not be described as a full reproduction of the original A-TGPO system.
+- `PrefixIG-TPO`: our main target-policy method.
+- `online PrefixIG-TPO+anchor`: online rollout refresh with token/action anchoring.
 
-Across five seeds and 200 episodes, the final metrics were:
+Secondary variants such as `rg_eff`, `curv`, true offline TPO, and inference-only target reweighting belong in the appendix unless needed for a specific ablation.
+
+## Main Experimental Story
+
+The experiments are organized as a ladder:
+
+1. **Controlled mechanism:** show that final reward does not distinguish useful and redundant search.
+2. **Trainable toy RLVR:** show that the target-policy idea survives actual optimization.
+3. **Small-model Qwen LoRA:** show that a real model can absorb the target behavior.
+4. **Online training:** show that PrefixIG-TPO can work without weighted-SFT as the main objective.
+5. **HotpotQA-mini pilot:** test the method in real retrieval QA under an SDAR search-skill prior.
+
+## Main Result 1: Trainable Toy RLVR
+
+We implemented a small MLX transformer RLVR task where the model chooses discrete search/action tokens and then emits an answer token. The task is small enough to run across seeds on a laptop, but preserves the key ambiguity: final answers can be correct with useful search, redundant search, or poor evidence behavior.
+
+Across five seeds and 200 episodes:
 
 ```text
 method              reward  useful  redundant  distractor  useful-red
@@ -136,86 +93,15 @@ prefixig_tpo        0.844   0.826   0.013      0.009       +0.813
 prefixig_tpo_rg_eff 0.847   0.838   0.004      0.011       +0.834
 ```
 
-The reward-only baseline achieved the highest final-answer reward, but it did not learn evidence-efficient behavior: useful and redundant correct behavior were nearly tied. The A-TGPO-style PrefixIG scalar objective strongly improved useful search behavior, showing that intermediate evidence credit matters. PrefixIG-TPO performed better still, producing high useful-search rates with very low redundant-search rates. Reward-gated efficiency gave the best useful-vs-redundant gap, reducing redundant correct behavior from `0.013` under PrefixIG-TPO to `0.004`.
+Interpretation: reward-only optimization achieves high answer reward but does not learn evidence-efficient behavior. PrefixIG-based objectives learn useful search. PrefixIG-TPO gives the strongest main-method result, substantially increasing useful behavior while keeping redundant search low.
 
-This result is important because it separates answer accuracy from search quality. A method can be accurate while still using poor or unnecessary evidence. Our method improves the process metric without collapsing reward, which is the behavior we want for retrieval-augmented reasoning systems.
+This is the cleanest mechanism result in the paper.
 
-### A-TGPO Component Ablation
+## Main Result 2: Qwen2.5-0.5B LoRA Generated Behavior
 
-To connect more directly to the original A-TGPO methodology, we also ran a small component ablation in the toy RLVR environment. The original A-TGPO design combines three ideas: turn-group normalization of information gain, variance-rescaled discounted accumulation, and adaptive turn-level clipping. We implemented small analogues of these components in the toy trainer and compared them against reward-only TPO, raw PrefixIG-GRPO, PrefixIG-TPO, and PrefixIG-TPO with reward-gated efficiency.
+We trained Qwen2.5-0.5B LoRA adapters from offline target distributions and evaluated only the `OriginalPolicy` row from each generated-policy diagnostic table. This row measures actual generated behavior from the loaded model, not post-hoc reweighting.
 
-Across five seeds and 200 episodes, the final metrics were:
-
-```text
-method                     reward  useful  redundant  distractor  useful-red
-reward_tpo                 0.921   0.088   0.091      0.007       -0.004
-prefixig_grpo              0.876   0.876   0.000      0.000       +0.876
-prefixig_grpo_turn_norm    0.596   0.000   0.596      0.001       -0.596
-prefixig_grpo_turn_norm_vr 0.595   0.000   0.595      0.001       -0.595
-prefixig_atgpo             0.797   0.000   0.797      0.001       -0.797
-prefixig_tpo               0.844   0.826   0.013      0.009       +0.813
-prefixig_tpo_rg_eff        0.846   0.838   0.004      0.011       +0.833
-```
-
-This ablation should be interpreted carefully. It does not show that A-TGPO fails in general; it shows that, in this simplified toy environment, scalar turn-level credit is sensitive to how normalization, accumulation, and clipping consume the information-gain signal. The naive turn-normalized variants and our simplified A-TGPO-style token objective over-concentrate on redundant-correct trajectories. A likely reason is that terminal reward is broadcast across action tokens, and in this toy environment redundant evidence remains highly correlated with correctness. This can cause token-level scalar updates to reinforce redundant actions even when the trajectory-level evidence objective would prefer concise useful search.
-
-The target-policy methods are more stable in this ablation. PrefixIG-TPO keeps high useful-correct behavior with low redundant-correct behavior, and reward-gated efficiency further reduces redundancy. This supports the broader methodological point: rather than only shaping token-level scalar advantages, constructing an explicit target distribution over competing trajectories gives a more direct way to move probability mass from redundant or distractor trajectories toward useful evidence trajectories.
-
-### Noisy Retriever Robustness
-
-The clean toy settings above are useful for controlled credit assignment, but real retrieval-augmented reasoning often contains stale or distracting evidence. We therefore added a noisy-retriever variant to the toy RLVR environment. In this setting, some evidence actions that would otherwise be useful are deterministically corrupted into either distractor evidence or stale/redundant evidence. This lets us test whether each objective learns evidence-efficient behavior when retrieval quality is imperfect.
-
-We ran mixed-hop tasks under two corruption levels. `mixed25` corrupts a moderate fraction of evidence actions, while `mixed50` creates a stronger noisy-retrieval condition. Each result is averaged over five seeds and 200 episodes.
-
-Under moderate retrieval noise, PrefixIG-TPO and PrefixIG-TPO with reward-gated efficiency outperform scalar PrefixIG-GRPO on the useful-minus-redundant process metric:
-
-```text
-mixed25
-method              reward  useful  redundant  distractor  useful-red
-reward_tpo          0.911   0.040   0.018      0.019       +0.022
-prefixig_grpo       0.994   0.576   0.224      0.000       +0.352
-prefixig_tpo        0.804   0.544   0.028      0.041       +0.517
-prefixig_tpo_rg_eff 0.756   0.536   0.007      0.061       +0.529
-```
-
-Under stronger retrieval noise, the difference becomes more pronounced. PrefixIG-GRPO maintains high answer reward, but it collapses toward redundant-correct behavior: redundant correct trajectories rise to `0.602`, and useful-minus-redundant becomes negative. PrefixIG-TPO remains positive, and reward-gated efficiency gives the best useful-minus-redundant gap while sharply suppressing redundancy:
-
-```text
-mixed50
-method              reward  useful  redundant  distractor  useful-red
-reward_tpo          0.911   0.025   0.009      0.023       +0.016
-prefixig_grpo       0.994   0.097   0.602      0.002       -0.505
-prefixig_tpo        0.792   0.210   0.148      0.073       +0.061
-prefixig_tpo_rg_eff 0.759   0.268   0.015      0.084       +0.253
-```
-
-This is the strongest controlled evidence for our target-policy construction so far. In clean settings, scalar PrefixIG-GRPO can be very competitive because the information-gain signal is nearly unambiguous. Under noisy retrieval, however, scalar updates can still reinforce trajectories that get the answer right while relying on stale or redundant evidence. PrefixIG-TPO is more robust because it constructs a group-level target distribution over competing trajectories, and reward-gated efficiency explicitly shifts mass away from redundant correct search. This experiment supports the hypothesis that target construction matters most when evidence quality is imperfect, which is the realistic regime for retrieval-augmented reasoning.
-
-### Offline Qwen2.5-0.5B LoRA Pilot
-
-The next step is a real language-model update. We implemented an offline target builder that generates Qwen2.5-0.5B trajectories, computes PrefixIG-TPO plus reward-gated efficiency target weights, writes a full candidate JSONL with `target_weight`, and creates an SFT-style dataset by sampling completions according to the `rg_eff` target distribution. This is a practical first Mac experiment because it avoids online generation during training and uses the existing MLX LoRA trainer.
-
-The current pilot uses Qwen2.5-0.5B-Instruct with 4-bit loading, LoRA adapters, masked-prompt SFT, short sequence length, and gradient checkpointing. This is not yet a true offline TPO trainer; it is a distillation step from the target distribution into an adapter. The full candidate JSONL preserves grouped target weights so that the next implementation can train directly with the offline TPO cross-entropy objective.
-
-In the first pilot run, the LoRA adapter trained successfully on a 16GB Apple Silicon laptop. The run used rank-8 LoRA over 8 layers, with 1.494M trainable parameters out of 494.033M total parameters, or 0.302% of the model. Training ran for 80 iterations and saved the final adapter to `outputs/adapters/offline_rg_eff_qwen_lora/adapters.safetensors`. The final training loss was `0.091`. On the held-out SFT-style offline target set, the adapter reached test loss `0.281` and perplexity `1.325`. These SFT metrics are not the main paper claim, but they verify that the rg_eff-distilled target distribution is learnable by a small Qwen2.5-0.5B LoRA adapter under the Mac-feasible setup.
-
-The intended evaluation is before/after generated-policy diagnostics on the same search QA distribution:
-
-```text
-exact-match answer accuracy
-useful correct search rate
-redundant correct search rate
-distractor/wrong search rate
-average search turns
-useful-red gap
-correct answer per search turn
-```
-
-We then ran memory-light generated-policy behavior diagnostics. The key evaluation row is `OriginalPolicy`, which reflects the actual generated behavior of the loaded model before any target reweighting. The other diagnostic rows in the script ask how different objectives would reweight the same generated batch; they are useful for debugging target construction, but they are not trained-model comparisons.
-
-The first small pilot compared base Qwen and an rg_eff-distilled LoRA over 8 generated trajectories. The base model produced mostly distractor/wrong search trajectories, while the rg_eff-LoRA adapter shifted strongly toward useful correct search. This established that the offline target distribution can transfer into generated behavior, but the sample size was too small and did not elicit redundant correct trajectories reliably.
-
-We therefore ran a cleaner held-out comparison using 5 examples, 2 samples per example, seed 101, flexible oracle-search rollouts, at most 2 search turns, and shorter action/answer budgets. We compared five loaded model conditions: base Qwen, reward-only TPO distillation, PrefixIG-TPO distillation, PrefixIG-TPO with reward-gated efficiency, and an A-TGPO component proxy distillation baseline. The table reports only the `OriginalPolicy` row for each loaded model:
+### Held-Out Multi-Hop Pilot
 
 ```text
 model                    useful  redundant  no_search  distractor  other  correct  useful-red
@@ -226,117 +112,11 @@ prefixig_tpo_rg_eff LoRA 0.391   0.307      0.000      0.302       0.000  0.698 
 atgpo_proxy LoRA         0.801   0.000      0.000      0.199       0.000  0.801    +0.801
 ```
 
-This held-out pilot gives a more informative pattern. Reward-only TPO distillation reaches perfect correctness on this small sample, but 40% of its probability mass is redundant correct search, giving a weak useful-minus-redundant gap. This is the expected failure mode of final-answer reward: it teaches the model to get the answer right, but it does not distinguish concise useful evidence from extra search.
+Interpretation: reward-only TPO reaches correctness but allocates substantial mass to redundant correct search. PrefixIG-TPO gives the strongest evidence behavior, with high correctness and no redundant correct mass. The A-TGPO proxy is a strong baseline but trails PrefixIG-TPO on this seed.
 
-PrefixIG-TPO gives the strongest behavior in this comparison: high correctness, almost all correct mass assigned to useful search, no redundant correct mass, and the largest useful-minus-redundant gap. The A-TGPO proxy is also strong and is an important baseline, but it trails PrefixIG-TPO on both correctness and useful evidence mass in this held-out seed. The reward-gated efficiency variant underperforms here, suggesting that the current efficiency penalty is not yet robust in the real-model LoRA setting. We therefore treat `rg_eff` as an ablation rather than the main method for the current paper story.
+### Mixed-Hop + Noisy Training
 
-We also ran a noisy/distractor stress test with the same 5-example, 2-sample, seed-101 setup. In this regime, the search index places a wrong birthplace result before the correct one, so the model must avoid following the first plausible retrieved fact. This is intentionally harsh for a small model and should be interpreted as a robustness diagnostic rather than the main performance table:
-
-```text
-model                    useful  redundant  no_search  distractor  other  correct  useful-red
-Base Qwen                0.000   0.000      0.000      1.000       0.000  0.000    +0.000
-reward_tpo LoRA          0.000   0.000      0.000      1.000       0.000  0.000    +0.000
-prefixig_tpo LoRA        0.111   0.000      0.000      0.889       0.000  0.111    +0.111
-prefixig_tpo_rg_eff LoRA 0.000   0.000      0.000      1.000       0.000  0.000    +0.000
-atgpo_proxy LoRA         0.090   0.000      0.000      0.910       0.000  0.090    +0.090
-```
-
-The noisy result shows that all current small LoRA models mostly follow the distractor evidence. However, PrefixIG-TPO is the only method that clearly improves over base and reward-only in this stress test, and it slightly exceeds the A-TGPO proxy. This supports keeping noisy retrieval as a robustness benchmark, but it also shows that the present offline SFT distillation setup is not yet sufficient for strong distractor resistance.
-
-Overall, the experiments so far support a clear story. Final reward teaches correctness but not evidence efficiency. PrefixIG provides useful intermediate credit. TPO target construction uses that signal directly by redistributing probability mass among competing trajectories. A-TGPO-style token credit is a strong baseline, and the current evidence does not support claiming that we beat it in all settings. Instead, the strongest current claim is that PrefixIG-TPO is a simple, Mac-feasible target-policy method that improves generated evidence behavior over reward-only training and is competitive with an A-TGPO proxy baseline. The next empirical milestone is to repeat the Qwen LoRA evaluation across more seeds and then replace SFT distillation with a true offline TPO trainer over grouped trajectory targets.
-
-### Mixed-Hop Qwen LoRA Follow-Up
-
-The first Qwen LoRA results suggested a useful diagnosis. PrefixIG-TPO performed very well on the held-out multi-hop regime, but its adapter had been trained mostly on multi-hop-style trajectories. On single-hop prompts, this produced an over-search failure: the model remained correct, but it shifted probability toward redundant correct trajectories. To test whether this was a data-regime issue, we constructed a mixed-hop offline training set that alternates single-hop and multi-hop cases during target construction.
-
-We trained two additional Qwen2.5-0.5B LoRA adapters with the same 4-bit, rank-8, 80-iteration MLX setup: `prefixig_tpo_mixedhop` and `atgpo_proxy_mixedhop`. The mixed-hop target builder used 16 prompts, 4 generated candidates per prompt, and 8 SFT draws per prompt, yielding 128 SFT records per target method. The average target mass was concentrated mostly on useful correct trajectories: `0.760` useful correct for PrefixIG-TPO mixed-hop and `0.790` useful correct for the A-TGPO proxy mixed-hop. The PrefixIG-TPO mixed-hop adapter reached validation loss `0.149`, while the A-TGPO proxy mixed-hop adapter reached validation loss `0.364`.
-
-We then evaluated the earlier five model conditions plus the two mixed-hop adapters on held-out single-hop, multi-hop, and noisy/distractor regimes. The table reports only the `OriginalPolicy` row, i.e. actual generated behavior from the loaded model.
-
-```text
-Single-hop, 5 examples x 2 samples, seed 101
-model                      useful  redundant  distractor  correct  useful-red
-Base Qwen                  0.724   0.200      0.076       0.924    +0.524
-reward_tpo LoRA            0.800   0.200      0.000       1.000    +0.600
-prefixig_tpo LoRA          0.382   0.618      0.000       1.000    -0.236
-prefixig_tpo_rg_eff LoRA   0.102   0.898      0.000       1.000    -0.796
-atgpo_proxy LoRA           0.902   0.098      0.000       1.000    +0.804
-prefixig_tpo_mixedhop      1.000   0.000      0.000       1.000    +1.000
-atgpo_proxy_mixedhop       0.215   0.607      0.178       0.822    -0.392
-
-Multi-hop, 5 examples x 2 samples, seed 101
-model                      useful  redundant  distractor  correct  useful-red
-Base Qwen                  0.174   0.000      0.826       0.174    +0.174
-reward_tpo LoRA            0.600   0.400      0.000       1.000    +0.200
-prefixig_tpo LoRA          0.914   0.000      0.086       0.914    +0.914
-prefixig_tpo_rg_eff LoRA   0.391   0.307      0.302       0.698    +0.084
-atgpo_proxy LoRA           0.801   0.000      0.199       0.801    +0.801
-prefixig_tpo_mixedhop      0.305   0.000      0.695       0.305    +0.305
-atgpo_proxy_mixedhop       0.910   0.000      0.090       0.910    +0.910
-
-Noisy/distractor, 5 examples x 2 samples, seed 101
-model                      useful  redundant  distractor  correct  useful-red
-Base Qwen                  0.000   0.000      1.000       0.000    +0.000
-reward_tpo LoRA            0.000   0.000      1.000       0.000    +0.000
-prefixig_tpo LoRA          0.111   0.000      0.889       0.111    +0.111
-prefixig_tpo_rg_eff LoRA   0.000   0.000      1.000       0.000    +0.000
-atgpo_proxy LoRA           0.090   0.000      0.910       0.090    +0.090
-prefixig_tpo_mixedhop      0.000   0.000      1.000       0.000    +0.000
-atgpo_proxy_mixedhop       0.000   0.105      0.895       0.105    -0.105
-```
-
-The mixed-hop experiment is encouraging, but in a specific way. PrefixIG-TPO mixed-hop fixes the single-hop over-search failure completely in this small evaluation: useful-minus-redundant moves from `-0.236` to `+1.000` while correctness remains perfect. This supports the idea that PrefixIG-TPO can learn concise useful search when the training target distribution includes the relevant regime. However, the same mixed-hop adapter loses the strong multi-hop behavior of the original PrefixIG-TPO adapter. The A-TGPO proxy mixed-hop adapter shows the opposite tradeoff: it is strong on multi-hop but poor on single-hop.
-
-The noisy/distractor result remains a negative stress test for all current small LoRA adapters. Mixing single-hop and multi-hop trajectories is not enough to teach distractor resistance. For the next real-model experiment, we should build a larger balanced target set with an explicit noisy-retrieval split, then train one PrefixIG-TPO adapter and one A-TGPO proxy adapter under the same data budget. This would directly test whether the target-policy construction can learn to reject misleading evidence rather than merely adapting to hop count.
-
-### Mixed-Hop + Noisy Qwen LoRA
-
-We then ran the direct follow-up: a mixed-hop + noisy training regime that cycles single-hop, multi-hop, and noisy/distractor cases. This required one correction to the noisy environment. The previous noisy retriever returned only the first high-ranking wrong birthplace fact, which made many cases closer to impossible retrieval than distractor robustness. We changed the retriever so tied birthplace matches return misleading and corrective evidence together, preserving the intended challenge: the model sees a wrong fact before a correct fact and must still answer from the useful evidence.
-
-The first target build still had too much distractor mass, because the base model rarely sampled useful noisy trajectories. We therefore added useful-correct oracle anchors to each candidate group during offline target construction. With 18 prompts, 4 generated samples per prompt, 2 oracle anchors per prompt, and 8 SFT draws per prompt, the resulting target distributions were strongly useful-correct:
-
-```text
-target method                  useful  redundant  distractor
-prefixig_tpo_mixedhop_noisy    0.804   0.083      0.113
-atgpo_proxy_mixedhop_noisy     0.776   0.096      0.128
-```
-
-Both adapters trained successfully on the same Mac-feasible Qwen2.5-0.5B 4-bit LoRA setup. PrefixIG-TPO mixed-hop+noisy reached final training loss `0.038` and validation loss `0.247`. A-TGPO proxy mixed-hop+noisy reached final training loss `0.089` and validation loss `0.081`.
-
-The held-out generated-policy results are the strongest real-model results so far:
-
-```text
-Single-hop, 5 examples x 2 samples, seed 101
-model                            useful  redundant  distractor  correct  useful-red
-Base Qwen                        0.724   0.200      0.076       0.924    +0.524
-reward_tpo LoRA                  0.800   0.200      0.000       1.000    +0.600
-prefixig_tpo LoRA                0.382   0.618      0.000       1.000    -0.236
-atgpo_proxy LoRA                 0.902   0.098      0.000       1.000    +0.804
-prefixig_tpo_mixedhop            1.000   0.000      0.000       1.000    +1.000
-prefixig_tpo_mixedhop_noisy      0.800   0.200      0.000       1.000    +0.600
-atgpo_proxy_mixedhop_noisy       0.526   0.000      0.474       0.526    +0.526
-
-Multi-hop, 5 examples x 2 samples, seed 101
-model                            useful  redundant  distractor  correct  useful-red
-Base Qwen                        0.174   0.000      0.826       0.174    +0.174
-reward_tpo LoRA                  0.600   0.400      0.000       1.000    +0.200
-prefixig_tpo LoRA                0.914   0.000      0.086       0.914    +0.914
-atgpo_proxy LoRA                 0.801   0.000      0.199       0.801    +0.801
-prefixig_tpo_mixedhop            0.305   0.000      0.695       0.305    +0.305
-prefixig_tpo_mixedhop_noisy      1.000   0.000      0.000       1.000    +1.000
-atgpo_proxy_mixedhop_noisy       0.800   0.000      0.200       0.800    +0.800
-
-Corrected noisy/distractor, 5 examples x 2 samples, seed 101
-model                            useful  redundant  distractor  correct  useful-red
-Base Qwen                        0.093   0.000      0.907       0.093    +0.093
-reward_tpo LoRA                  0.200   0.400      0.400       0.600    -0.200
-prefixig_tpo LoRA                0.505   0.200      0.295       0.705    +0.305
-atgpo_proxy LoRA                 0.400   0.196      0.404       0.596    +0.204
-prefixig_tpo_mixedhop_noisy      0.800   0.000      0.200       0.800    +0.800
-atgpo_proxy_mixedhop_noisy       0.800   0.000      0.200       0.800    +0.800
-```
-
-For the main method comparison, the same results can be summarized more compactly as:
+We then trained PrefixIG-TPO and A-TGPO proxy adapters on a mixed-hop+noisy target set with useful-correct anchors. This is the most balanced small-model offline result.
 
 ```text
 Evaluation regime          method                         correct  useful  redundant  distractor  useful-red
@@ -350,67 +130,17 @@ corrected noisy/distractor PrefixIG-TPO mixedhop+noisy    0.800    0.800   0.000
 corrected noisy/distractor A-TGPO proxy mixedhop+noisy    0.800    0.800   0.000      0.200       +0.800
 ```
 
-This result changes the paper story in a good way. The earlier PrefixIG-TPO adapter was strong on multi-hop but brittle across regimes. The mixed-hop+noisy PrefixIG-TPO adapter is balanced: it preserves perfect correctness on single-hop and multi-hop while substantially improving noisy retrieval. It also avoids the reward-only failure mode where noisy correctness comes with redundant search. The A-TGPO proxy matches PrefixIG-TPO on the corrected noisy split, but is weaker on single-hop and multi-hop in this seed. Because this is still a 5-prompt-per-regime pilot, the right next step is multi-seed evaluation and a larger held-out set, not a stronger claim yet.
+Interpretation: PrefixIG-TPO is balanced across single-hop, multi-hop, and corrected noisy retrieval. A-TGPO proxy matches on corrected noisy retrieval but is weaker on single-hop and multi-hop in this seed.
 
-### Offline TPO Loss Pilot
+## Main Result 3: Online PrefixIG-TPO With Token/Action Anchor
 
-To test whether the target-policy construction can be trained directly rather than only distilled through weighted SFT, we implemented a true offline TPO trainer. For each case, the trainer loads all candidate trajectories, scores each completion under the current model, forms a softmax distribution over the group, and minimizes cross-entropy to the fixed PrefixIG-TPO target weights.
-
-The implementation is feasible on the 16GB Apple Silicon setting: Qwen2.5-0.5B 4-bit LoRA with 6 trajectories per group peaked around `10.05GB` memory. However, the first pure grouped-loss result is not yet competitive with weighted SFT:
+To test whether PrefixIG-TPO can work without weighted-SFT as the main training objective, we implemented online rollout refresh:
 
 ```text
-regime            model                          correct  useful  redundant  distractor  useful-red
-single-hop        PrefixIG-TPO weighted-SFT      1.000    0.800   0.200      0.000       +0.600
-single-hop        PrefixIG-TPO true-TPO scratch  0.485    0.485   0.000      0.283       +0.485
-single-hop        PrefixIG-TPO SFT-warm true-TPO 1.000    1.000   0.000      0.000       +1.000
-multi-hop         PrefixIG-TPO weighted-SFT      1.000    1.000   0.000      0.000       +1.000
-multi-hop         PrefixIG-TPO true-TPO scratch  0.190    0.190   0.000      0.703       +0.190
-multi-hop         PrefixIG-TPO SFT-warm true-TPO 0.333    0.333   0.000      0.667       +0.333
-corrected noisy   PrefixIG-TPO weighted-SFT      0.800    0.800   0.000      0.200       +0.800
-corrected noisy   PrefixIG-TPO true-TPO scratch  0.000    0.000   0.000      0.585       +0.000
-corrected noisy   PrefixIG-TPO SFT-warm true-TPO 0.419    0.337   0.082      0.581       +0.256
+q(y | x) proportional to pi_old(y | x) exp(U(y) / tau).
 ```
 
-This should be treated as a useful negative pilot rather than a final result. The grouped TPO objective directly optimizes the distributional claim we want, but by itself it is under-constrained for generation quality and format preservation. The next implementation should use a hybrid objective: offline TPO over groups plus an SFT or KL anchor on high-target trajectories. That would test the paper's central hypothesis while preserving the behavioral benefits of the current weighted-SFT adapter.
-
-### Online PrefixIG-TPO With Token/Action Anchor
-
-The offline TPO failure suggests that target-policy matching should be tested in the online setting used by TPO-style RL. We therefore implemented an online PrefixIG-TPO pilot. The model is warm-started from the strongest PrefixIG-TPO weighted-SFT adapter. Each online iteration samples fresh rollouts from the current policy, scores them with final reward and PrefixIG, constructs the target distribution
-
-```text
-q(y | x) proportional to pi_old(y | x) exp(U(y) / tau),
-```
-
-and updates the LoRA adapter with a grouped TPO cross-entropy. To prevent the action language from drifting, the update includes a small token/action behavior anchor: a target-weighted token negative log-likelihood over the freshly sampled trajectories.
-
-```text
-loss = grouped PrefixIG-TPO loss + beta * weighted token/action NLL
-```
-
-This is not the same as the earlier offline weighted-SFT baseline: the rollouts are refreshed from the current policy after each online round. The pilot used Qwen2.5-0.5B 4-bit LoRA, the mixed-hop+noisy regime, 5 online iterations, 2 prompts per iteration, 3 samples per prompt, 2 update steps per iteration, learning rate `1e-5`, and anchor weight `0.05`. Peak memory was about `7.5GB`.
-
-Held-out generated-policy comparison:
-
-```text
-regime      model                      correct  useful  redundant  distractor  useful-red
-single-hop  PrefixIG-TPO weighted-SFT  1.000    0.800   0.200      0.000       +0.600
-single-hop  A-TGPO proxy               0.526    0.526   0.000      0.474       +0.526
-single-hop  online PrefixIG-TPO+anchor 0.898    0.698   0.200      0.102       +0.498
-
-multi-hop   PrefixIG-TPO weighted-SFT  1.000    1.000   0.000      0.000       +1.000
-multi-hop   A-TGPO proxy               0.800    0.800   0.000      0.200       +0.800
-multi-hop   online PrefixIG-TPO+anchor 0.804    0.804   0.000      0.196       +0.804
-
-noisy       PrefixIG-TPO weighted-SFT  0.800    0.800   0.000      0.200       +0.800
-noisy       A-TGPO proxy               0.800    0.800   0.000      0.200       +0.800
-noisy       online PrefixIG-TPO+anchor 0.902    0.902   0.000      0.098       +0.902
-```
-
-This is the first result in which a non-SFT-main-objective version of our method is competitive with the A-TGPO proxy across all regimes. The online PrefixIG-TPO+anchor adapter substantially outperforms A-TGPO proxy on single-hop, slightly outperforms it on multi-hop, and improves noisy retrieval from `0.800` to `0.902` useful/correct. This is important because the previous true-offline-TPO variants were usually behind A-TGPO on multi-hop and noisy retrieval.
-
-At the same time, the online update is not yet better than the weighted-SFT warm start on clean single-hop and multi-hop. This makes the result a promising algorithmic direction rather than a final headline. The lesson is that online rollout refresh plus a token/action anchor fixes the collapse seen in pure offline TPO, but the update strength still needs tuning. The next pass should reduce the learning rate or number of updates, or increase `beta`, so the online method keeps the weighted-SFT adapter's clean-regime behavior while preserving the noisy-retrieval gain.
-
-We then ran a small anchor-strength sweep while keeping the online rollout and update schedule fixed. A weak anchor (`beta=0.02`) underperformed, especially on multi-hop. Increasing the token/action anchor to `beta=0.10` preserved the clean-regime behavior and retained the noisy-retrieval improvement:
+The model samples fresh trajectories, builds grouped PrefixIG-TPO targets, and updates a LoRA adapter with grouped TPO loss plus token/action anchoring. The best anchor setting was `beta=0.10`.
 
 ```text
 anchor beta  regime      correct  useful  redundant  distractor  useful-red
@@ -423,28 +153,24 @@ anchor beta  regime      correct  useful  redundant  distractor  useful-red
 0.10         noisy       1.000    1.000   0.000      0.000       +1.000
 ```
 
-This sweep changes the interpretation of the online result: the earlier `beta=0.05` setting showed the method was viable and competitive with A-TGPO, while `beta=0.10` shows that the token/action anchor can recover the weighted-SFT adapter's clean-regime performance and improve noisy retrieval in the same run. The sample size is still small, so the next step is to repeat this setting with more held-out prompts and seeds.
-
-We repeated the `beta=0.10` setting in a separate run directory to verify that the result was not an artifact of a stale adapter. The repeated run reproduced the same held-out behavior:
+We repeated the `beta=0.10` setting in a fresh directory and reproduced the same held-out behavior:
 
 ```text
-run                         regime      correct  useful  redundant  distractor  useful-red
-online PrefixIG-TPO beta=.10 single-hop 1.000    0.800   0.200      0.000       +0.600
-online PrefixIG-TPO beta=.10 multi-hop  1.000    1.000   0.000      0.000       +1.000
-online PrefixIG-TPO beta=.10 noisy      1.000    1.000   0.000      0.000       +1.000
+run                          regime      correct  useful  redundant  distractor  useful-red
+online PrefixIG-TPO beta=.10 single-hop  1.000    0.800   0.200      0.000       +0.600
+online PrefixIG-TPO beta=.10 multi-hop   1.000    1.000   0.000      0.000       +1.000
+online PrefixIG-TPO beta=.10 noisy       1.000    1.000   0.000      0.000       +1.000
 ```
 
-For model comparison, we use the `OriginalPolicy` row from each generated-policy diagnostic table, because that row measures the trained adapter's actual sampled behavior. The additional rows in those diagnostics reweight the same generated samples under alternative target policies; when all sampled trajectories are already useful-correct, all diagnostic rows also become `1.000`.
+Interpretation: online PrefixIG-TPO is viable when the token/action anchor is strong enough. This result supports the online direction and distinguishes the method from pure weighted-SFT distillation.
 
-### Real-World HotpotQA-Mini and SDAR Search Skills
+## Main Result 4: HotpotQA-Mini Real-World Pilot
 
-We next moved beyond the synthetic search environment to a real retrieval-QA pilot using HotpotQA. We built `HotpotQA-mini` from the `hotpot_qa/distractor` split: 80 training questions, 40 evaluation questions, and a local corpus of 951 deduplicated passages. Each example preserves the question, short gold answer, supporting document titles, support passages, and distractor passages. The evaluator uses a local BM25-style retriever over this corpus and lets the model interact through `<search>`, `<result>`, and `<answer>` actions. This experiment is intentionally small enough for the Mac setup, but it tests a harder real-world failure mode: the model must write useful search queries, retrieve evidence, and synthesize a short answer.
+We built `HotpotQA-mini` from the `hotpot_qa/distractor` split: 80 training questions, 40 evaluation questions, and a local corpus of 951 deduplicated passages. Each example preserves the question, short gold answer, supporting document titles, support passages, and distractor passages. The evaluator uses a local BM25-style retriever and lets the model interact through `<search>`, `<result>`, and `<answer>` actions.
 
-The first unrestricted HotpotQA-mini runs showed that controlled synthetic success did not transfer automatically. Qwen2.5-0.5B often retrieved useful evidence but failed to synthesize the correct short answer or repeated broad searches. Hotpot-specific online PrefixIG-TPO training with gold support anchors also underperformed: it over-shifted the model toward short title/entity searches and reduced support coverage on held-out questions. We therefore treat these runs as a negative transfer pilot rather than as a method result. The main diagnosis is that real HotpotQA introduces query-planning and answer-synthesis errors that are mostly absent from the controlled oracle-search environment.
+Early unrestricted HotpotQA-mini runs showed that synthetic success did not transfer automatically. Qwen2.5-0.5B often retrieved evidence but failed answer synthesis. We therefore used Qwen2.5-1.5B and added SDAR search-skill prompts as a Mac-feasible search prior. We did not run the full SDAR CUDA/vLLM/Ray training stack; we only injected SDAR search skills into the prompt.
 
-To test this diagnosis, we adapted a lightweight idea from the SDAR repository: skill-conditioned search prompting. We did not run SDAR's full CUDA/vLLM/Ray training stack. Instead, we injected SDAR's search skill files as a prompt-side search prior: general search skills, multi-hop reasoning skills, and comparison skills. This gives the policy explicit guidance such as decomposing multi-hop questions, issuing targeted sequential searches, collecting comparable attributes before answering, and stopping once evidence is sufficient. The evaluator supports this through `--skill-prompt-file`, which makes the comparison Mac-feasible and isolates the effect of the search-skill prior.
-
-The key real-world result is positive:
+### SDAR Prompting Improves the Candidate Pool
 
 ```text
 HotpotQA-mini, Qwen2.5-1.5B-Instruct 4-bit, 8 examples x 2 samples, seed 101
@@ -453,11 +179,11 @@ no skills          0.125    0.062   0.062      0.000      0.812       0.062  +0.
 SDAR search skills 0.438    0.312   0.062      0.062      0.500       0.062  +0.250      0.188  0.279     0.656
 ```
 
-The SDAR skill prior improves correctness by `+0.313`, useful-correct behavior by `+0.250`, and support coverage by `+0.125` absolute. This is the first positive real-world HotpotQA-mini result in the project. It suggests that the bottleneck was not simply model scale: Qwen2.5-1.5B without skills remained weak, while the same model with an explicit search-strategy prior produced more useful trajectories and fewer distractor failures.
+Interpretation: SDAR-style search skills improve the candidate pool and make HotpotQA-mini feasible enough to test our training objective.
 
-This result also clarifies how SDAR-style skill conditioning can complement PrefixIG-TPO. PrefixIG-TPO can only reweight or train on trajectories that exist in the candidate pool. In the earlier Hotpot runs, the candidate pool had too few useful-correct trajectories. SDAR search skills improve the candidate pool by making the base policy search more deliberately.
+### SDAR + Method Comparison
 
-We then ran the direct method comparison under the same SDAR skill prior. The base condition is Qwen2.5-1.5B with SDAR skills at inference time only. The two trained conditions use the same SDAR skill prompts during online rollout generation and evaluation, then update separate LoRA adapters with either PrefixIG-TPO or the A-TGPO proxy target. The run used 5 online iterations, 1 prompt per iteration, 2 samples per prompt, 1 update per iteration, learning rate `5e-6`, anchor weight `0.10`, and the same 8-example, 2-sample held-out evaluation.
+All conditions below use Qwen2.5-1.5B 4-bit and the same SDAR skill prompts. The base condition is inference only. The trained conditions use the same SDAR prompts during online rollout generation and evaluation, then update separate LoRA adapters with either PrefixIG-TPO or A-TGPO proxy targets.
 
 ```text
 HotpotQA-mini + SDAR skills, Qwen2.5-1.5B-Instruct 4-bit, 8 examples x 2 samples, seed 101
@@ -467,11 +193,9 @@ PrefixIG-TPO + SDAR   0.500    0.375   0.125      0.000      0.500       0.000  
 A-TGPO proxy + SDAR   0.375    0.250   0.125      0.000      0.500       0.125  +0.125      0.250  0.344     0.531
 ```
 
-This is a good pilot signal for the method. With the same SDAR search prior, PrefixIG-TPO improves correctness over prompt-only inference from `0.250` to `0.500`, doubles useful-correct behavior from `0.188` to `0.375`, and raises support coverage from `0.531` to `0.750`. It also outperforms the A-TGPO proxy on the main retrieval-process metrics: correctness, useful evidence use, useful-minus-redundant, token F1, and support coverage. The A-TGPO proxy has slightly higher exact match in this small run, so the result should be described as a process-quality win rather than a final QA win.
+Seed 101 is a positive pilot: PrefixIG-TPO improves correctness, useful evidence use, token F1, and support coverage over the SDAR-only base, and outperforms the A-TGPO proxy on the main process metrics.
 
-The main limitation is scale. The comparison has only 16 held-out samples and the online training groups are tiny, so we should not present it as a definitive real-world benchmark. Its value is that it closes the loop missing from the previous SDAR-only result: SDAR improves the candidate pool, and PrefixIG-TPO can then learn from that improved pool better than the A-TGPO proxy on the same Mac-feasible setup. Peak memory was high, around `19GB` for PrefixIG-TPO and `17GB` for A-TGPO proxy, so larger runs need careful batching or a smaller update schedule.
-
-We then ran a small scale-up/replication with a different seed: 12 held-out examples, 2 samples per example, seed 202, and 8 online iterations for each trained adapter. This is still a pilot, but it tests whether the seed-101 result survives a larger held-out sample and a different training/evaluation seed.
+We then ran a scale-up/replication with 12 held-out examples, 2 samples per example, seed 202, and 8 online iterations:
 
 ```text
 HotpotQA-mini + SDAR skills, Qwen2.5-1.5B-Instruct 4-bit, 12 examples x 2 samples, seed 202
@@ -481,6 +205,108 @@ PrefixIG-TPO + SDAR   0.208    0.167   0.042      0.000      0.750       0.042  
 A-TGPO proxy + SDAR   0.000    0.000   0.000      0.000      0.958       0.042  +0.000      0.000  0.021     0.438
 ```
 
-The replication is mixed. PrefixIG-TPO does not improve answer correctness over the SDAR prompt-only baseline on seed 202: both are `0.208`. However, it substantially changes the type of correct behavior. The base SDAR policy's correct answers are entirely redundant-correct (`0.208` redundant, `0.000` useful), whereas PrefixIG-TPO shifts most correct mass toward useful evidence (`0.167` useful, `0.042` redundant), improving useful-minus-redundant from `-0.208` to `+0.125` and support coverage from `0.438` to `0.500`. The A-TGPO proxy is unstable in this run, collapsing to mostly distractor-wrong trajectories.
+The replication is mixed. PrefixIG-TPO does not improve correctness over Base+SDAR on seed 202. However, it shifts correct behavior from redundant evidence to useful evidence and improves support coverage. A-TGPO proxy is unstable in this run, collapsing to mostly distractor-wrong trajectories.
 
-Taken together, the HotpotQA-mini results support a narrower but still useful claim. The seed-101 run showed gains in both correctness and process quality; the seed-202 scale-up does not replicate the correctness gain, but it does replicate the process-quality direction and shows better stability than the A-TGPO proxy. Therefore, the current real-world claim should be framed as a promising pilot: PrefixIG-TPO can improve evidence-use behavior over the same SDAR candidate prior, but larger seeds/data are needed before claiming robust QA accuracy improvements.
+### Real-World Claim
+
+The current real-world claim should be cautious:
+
+```text
+Under the same SDAR search prior, PrefixIG-TPO shows promising evidence-use improvements and better stability than the A-TGPO proxy in small HotpotQA-mini pilots. Robust answer-accuracy gains require larger seeds and data.
+```
+
+This is enough to motivate the method, but not enough to claim a solved real-world QA benchmark.
+
+## Recommended Main Paper Structure
+
+1. Introduction: final reward misses evidence quality.
+2. Method: PrefixIG and target-policy construction.
+3. Controlled experiments: toy RLVR and Qwen LoRA.
+4. Online training: PrefixIG-TPO + action anchor.
+5. Real-world pilot: HotpotQA-mini with SDAR skills.
+6. Limitations: small samples, A-TGPO proxy rather than full A-TGPO, Hotpot accuracy not yet robust.
+
+## Appendix A: Target-Construction Diagnostics
+
+### Synthetic Target Diagnostics
+
+Controlled synthetic cases isolate whether target construction assigns mass to useful correct trajectories rather than redundant correct trajectories. The main metric is `useful-red`: useful-correct target mass minus redundant-correct target mass.
+
+```text
+method                useful-red
+OriginalPolicy        +0.002
+FinalReward-TPO       +0.004
+PrefixIG-GRPO         +0.093
+A-TGPO-components     +0.108
+PrefixIG-TPO          +0.112
+PrefixIG-TPO+curv     +0.288
+```
+
+### Real MLX Generated Rollout Diagnostics
+
+Generated-policy diagnostics with Qwen2.5-0.5B showed that reward-only objectives improve correctness but do not reliably prefer efficient search. PrefixIG-based target construction improves the useful-vs-redundant gap.
+
+```text
+method                   useful-red
+OriginalPolicy           -0.015
+FinalReward-TPO          -0.014
+PrefixIG-GRPO            +0.133
+A-TGPO-components        -0.008
+PrefixIG-TPO             +0.166
+PrefixIG-TPO+rg_eff      +0.273
+PrefixIG-TPO+curv        +0.337
+PrefixIG-TPO+curv+rg_eff +0.406
+```
+
+These diagnostics are useful for debugging target construction, but they should not be presented as trained-model results.
+
+## Appendix B: A-TGPO Component Ablation
+
+To connect with the original A-TGPO methodology, we implemented small analogues of turn-group normalization, variance-rescaled accumulation, and adaptive turn-level clipping in the toy trainer.
+
+```text
+method                     reward  useful  redundant  distractor  useful-red
+reward_tpo                 0.921   0.088   0.091      0.007       -0.004
+prefixig_grpo              0.876   0.876   0.000      0.000       +0.876
+prefixig_grpo_turn_norm    0.596   0.000   0.596      0.001       -0.596
+prefixig_grpo_turn_norm_vr 0.595   0.000   0.595      0.001       -0.595
+prefixig_atgpo             0.797   0.000   0.797      0.001       -0.797
+prefixig_tpo               0.844   0.826   0.013      0.009       +0.813
+prefixig_tpo_rg_eff        0.846   0.838   0.004      0.011       +0.833
+```
+
+This ablation should be interpreted carefully. It does not show that A-TGPO fails in general; it shows that simplified token-level scalar credit can over-concentrate on redundant-correct trajectories in our toy setting.
+
+## Appendix C: Additional Qwen LoRA Ablations
+
+### Single-Hop vs Multi-Hop Mixed Training
+
+The first mixed-hop adapter fixed single-hop over-search but lost some multi-hop behavior. This motivated the mixed-hop+noisy training regime used in the main results.
+
+### Noisy/Distractor Stress Tests
+
+The early noisy/distractor setup was too harsh because the retriever often returned only misleading evidence. We corrected it so misleading and corrective evidence can appear together. This produced the mixed-hop+noisy result reported in the main text.
+
+### True Offline TPO Loss Pilot
+
+We implemented a true grouped offline TPO trainer, but the first pure grouped-loss result underperformed weighted-SFT-style distillation. Qwen2.5-0.5B 4-bit LoRA with 6 trajectories per group peaked around `10GB` memory and was feasible, but the training signal was unstable. This motivated the online rollout-refresh plus token/action anchor variant.
+
+### Candidate-Selection Inference
+
+We also tested no-training candidate selection: generate candidates with Base+SDAR, then reweight/select with PrefixIG-TPO or A-TGPO scoring. This did not clearly help PrefixIG-TPO. The result is useful as an internal diagnostic, but it should not be in the main paper unless we want to emphasize that the benefit comes from policy adaptation rather than cheap reranking.
+
+## Current Bottom Line
+
+The strongest defensible claim is:
+
+```text
+PrefixIG-TPO is a simple target-policy method for evidence-seeking reasoning. It improves useful evidence behavior in controlled RLVR and small Qwen LoRA experiments, is competitive with an A-TGPO-style proxy, and shows promising process-quality improvements in HotpotQA-mini when combined with an SDAR search prior.
+```
+
+The weakest claim would be:
+
+```text
+PrefixIG-TPO robustly improves real-world HotpotQA answer accuracy.
+```
+
+We should not claim that yet.
