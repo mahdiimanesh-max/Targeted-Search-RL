@@ -69,6 +69,20 @@ The main comparisons should be:
 
 Secondary variants such as `rg_eff`, `curv`, true offline TPO, and inference-only target reweighting belong in the appendix unless needed for a specific ablation.
 
+### Why PrefixIG-TPO Can Improve Over A-TGPO-Style Credit
+
+A-TGPO-style methods use information gain as a turn/token-level scalar credit signal, together with normalization, clipping, and trust-region accounting. This is a strong and relevant baseline, especially for long multi-turn reasoning. Our approach keeps the same motivating signal, prefix information gain, but uses it differently: PrefixIG-TPO builds an explicit target distribution over competing trajectories for the same prompt.
+
+This gives three practical benefits.
+
+First, the update is directly comparative at the trajectory level. If two trajectories both answer correctly but one uses concise useful evidence and the other uses redundant evidence, scalar token-level credit can still reinforce both. PrefixIG-TPO can assign more target mass to the useful trajectory and less to the redundant one within the same candidate group.
+
+Second, the objective is simpler to train in small-model and laptop-constrained settings. Our main update only requires grouped sequence scores and a cross-entropy to the target distribution. The A-TGPO proxy requires more detailed token/turn accounting, clipping, and component diagnostics, and in our Mac-feasible experiments it was more sensitive to the sampled candidate mix.
+
+Third, the target-policy view is easy to combine with stabilizers such as a token/action anchor. The online PrefixIG-TPO+anchor variant separates the evidence objective from the language/action-format preservation term, which made the online update substantially more stable than pure grouped TPO in our experiments.
+
+The claim should be stated carefully: we do not claim to outperform a full-scale, fully tuned A-TGPO implementation. We compare against an A-TGPO-style proxy that implements the relevant component logic in a Mac-feasible setting. Within that setting, PrefixIG-TPO is often more stable on useful evidence behavior, especially when redundant-correct and distractor trajectories compete with useful-correct trajectories.
+
 ## Main Experimental Story
 
 The experiments are organized as a ladder:
